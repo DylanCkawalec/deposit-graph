@@ -15,6 +15,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
+use std::path::Path;
+
+
+
 
 abigen!(
     DepositGraph,
@@ -112,9 +116,13 @@ async fn test_rpc(data: web::Data<AppState>) -> impl Responder {
     }
 }
 
+
 #[actix_web::main]
 async fn main() -> Result<()> {
-    dotenv().ok();
+    let ethereum_sepolia_rpc_url = env::var("ETHEREUM_SEPOLIA_RPC_URL").context("ETHEREUM_SEPOLIA_RPC_URL must be set")?;
+
+    let dot_env_path = Path::new("../../.env");
+    dotenv::from_path(dot_env_path).ok();
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
