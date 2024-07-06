@@ -11,6 +11,7 @@ use ethers::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::env;
 
 pub use deposit_graph::DepositGraph;
 
@@ -26,6 +27,14 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
     let mut contracts = HashMap::new();
 
     for chain_config in &config.chain_configs {
+        println!("Initializing contract for chain ID: {}", chain_config.chain_id);
+        println!("Contract address env var: {}", chain_config.contract_address_env);
+        
+        println!("All environment variables:");
+        for (key, value) in env::vars() {
+            println!("{}: {}", key, value);
+        }
+        
         let rpc_url = format!(
             "https://lb.drpc.org/ogrpc?network={}&dkey={}",
             chain_config.network, config.drpc_api_key
@@ -40,10 +49,13 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
                 chain_config.contract_address_env
             )
         })?;
+        println!("Contract address: {}", contract_address);
+        
         let contract_address: ethers::types::Address = contract_address.parse()?;
         let contract = DepositGraph::new(contract_address, Arc::new(client));
 
         contracts.insert(U256::from(chain_config.chain_id), Arc::new(contract));
+        println!("Contract initialized for chain ID: {}", chain_config.chain_id);
     }
 
     Ok(contracts)

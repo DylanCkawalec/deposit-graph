@@ -6,11 +6,28 @@ use deposit_graph::{
 };
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 use std::path::Path;
+
+fn print_env_file_contents(path: &str) {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            println!("Contents of {}:\n{}", path, contents);
+            // Parse and set environment variables manually
+            for line in contents.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    env::set_var(key.trim(), value.trim());
+                    println!("Manually set: {} = {}", key.trim(), value.trim());
+                }
+            }
+        },
+        Err(e) => println!("Failed to read {}: {}", path, e),
+    }
+}
 
 fn print_env_vars() {
     for (key, value) in env::vars() {
@@ -24,6 +41,7 @@ async fn main() -> std::io::Result<()> {
     let env_paths = vec![".env", "../.env", "../../.env"];
     for path in env_paths {
         if Path::new(path).exists() {
+            print_env_file_contents(path);
             dotenv::from_path(path).ok();
             println!("Loaded .env from {}", path);
             break;
