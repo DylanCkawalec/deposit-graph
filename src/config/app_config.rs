@@ -1,7 +1,6 @@
-use anyhow::Result;
+use anyhow::{Result, Context};
 use serde::Deserialize;
 use std::env;
-use std::path::Path;
 
 #[derive(Clone, Deserialize)]
 pub struct AppConfig {
@@ -21,26 +20,14 @@ pub struct ChainConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        let env_paths = vec![".env", "../.env", "../../.env"];
-
-        for path in env_paths {
-            if Path::new(path).exists() {
-                dotenv::from_path(path).ok();
-                break;
-            }
-        }
-
-        for (key, value) in std::env::vars() {
-            println!("{}: {}", key, value);
-        }
-
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
                 .unwrap_or_else(|_| "8080".to_string())
-                .parse()?,
-            private_key: env::var("PRIVATE_KEY")?,
-            drpc_api_key: env::var("DRPC_API_KEY")?,
+                .parse()
+                .context("Failed to parse PORT")?,
+            private_key: env::var("PRIVATE_KEY").context("PRIVATE_KEY must be set")?,
+            drpc_api_key: env::var("DRPC_API_KEY").context("DRPC_API_KEY must be set")?,
             chain_configs: vec![
                 ChainConfig {
                     chain_id: 11155111,

@@ -1,7 +1,7 @@
 pub mod deposit_graph;
 
 use crate::config::AppConfig;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ethers::{
     middleware::SignerMiddleware,
     providers::{Http, Provider},
@@ -34,8 +34,8 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
         let wallet: LocalWallet = config.private_key.parse()?;
         let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
 
-        let contract_address = std::env::var(&chain_config.contract_address_env).map_err(|_| {
-            anyhow::anyhow!(
+        let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
+            format!(
                 "Missing environment variable: {}",
                 chain_config.contract_address_env
             )
@@ -48,27 +48,3 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
 
     Ok(contracts)
 }
-
-/*pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Arc<ContractType>>> {
-
-    let mut contracts = HashMap::new();
-
-    for chain_config in &config.chain_configs {
-        let rpc_url = format!(
-            "https://lb.drpc.org/ogrpc?network={}&dkey={}",
-            chain_config.network, config.drpc_api_key
-        );
-        let provider = Provider::<Http>::try_from(rpc_url)?;
-        let wallet: LocalWallet = config.private_key.parse()?;
-        let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
-
-        let contract_address = std::env::var(&chain_config.contract_address_env)?;
-        let contract_address: ethers::types::Address = contract_address.parse()?;
-        let contract = DepositGraph::new(contract_address, Arc::new(client));
-
-        contracts.insert(U256::from(chain_config.chain_id), Arc::new(contract));
-    }
-
-    Ok(contracts)
-}
-    */
