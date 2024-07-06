@@ -13,42 +13,33 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 use std::path::Path;
 
-fn print_env_file_contents(path: &str) {
-    match fs::read_to_string(path) {
-        Ok(contents) => {
-            println!("Contents of {}:\n{}", path, contents);
-            // Parse and set environment variables manually
-            for line in contents.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    env::set_var(key.trim(), value.trim());
-                    println!("Manually set: {} = {}", key.trim(), value.trim());
-                }
+fn load_env_file(path: &str) -> std::io::Result<()> {
+    let contents = fs::read_to_string(path)?;
+    println!("Contents of {}:", path);
+    for line in contents.lines() {
+        if !line.starts_with('#') && !line.is_empty() {
+            let parts: Vec<&str> = line.splitn(2, '=').collect();
+            if parts.len() == 2 {
+                let key = parts[0].trim();
+                let value = parts[1].trim();
+                println!("  {}: {}", key, if key.contains("KEY") { "[REDACTED]" } else { value });
+                env::set_var(key, value);
             }
-        },
-        Err(e) => println!("Failed to read {}: {}", path, e),
+        }
     }
-}
-
-fn print_env_vars() {
-    for (key, value) in env::vars() {
-        println!("{}: {}", key, value);
-    }
+    Ok(())
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Try to load .env from multiple possible locations
     let env_paths = vec![".env", "../.env", "../../.env"];
     for path in env_paths {
         if Path::new(path).exists() {
-            print_env_file_contents(path);
-            dotenv::from_path(path).ok();
+            load_env_file(path)?;
             println!("Loaded .env from {}", path);
             break;
         }
     }
-    
-    print_env_vars();
 
     let config = config::AppConfig::from_env().expect("Failed to load configuration");
 
