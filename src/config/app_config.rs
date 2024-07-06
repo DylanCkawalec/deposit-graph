@@ -29,11 +29,10 @@ impl AppConfig {
                 break;
             }
         }
-        
+
         for (key, value) in std::env::vars() {
             println!("{}: {}", key, value);
         }
-
 
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),

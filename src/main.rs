@@ -4,6 +4,7 @@ use deposit_graph::{
     contracts::{self, AppState},
     events,
 };
+use std::path::Path;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -11,14 +12,21 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-   
-    println!("Current working directory: {:?}", env::current_dir().unwrap());
-    println!("ETHEREUM_SEPOLIA_CONTRACT_ADDRESS: {:?}", env::var("ETHEREUM_SEPOLIA_CONTRACT_ADDRESS"));
+fn print_env_vars() {
+    println!(
+        "ETHEREUM_SEPOLIA_CONTRACT_ADDRESS: {:?}",
+        env::var("ETHEREUM_SEPOLIA_CONTRACT_ADDRESS")
+    );
     println!("DRPC_API_KEY: {:?}", env::var("DRPC_API_KEY"));
     println!("PRIVATE_KEY: {:?}", env::var("PRIVATE_KEY"));
-    
+    // Add other environment variables as needed
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    dotenv::dotenv().ok();
+    print_env_vars();
+
     let config = config::AppConfig::from_env().expect("Failed to load configuration");
 
     tracing_subscriber::fmt()
