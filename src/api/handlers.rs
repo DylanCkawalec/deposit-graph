@@ -1,9 +1,9 @@
 use crate::contracts::AppState;
 use actix_web::{web, HttpResponse, Responder};
+use ethers::providers::Middleware;
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use ethers::providers::Middleware;
 
 #[derive(Deserialize)]
 pub struct BlobUpdate {
@@ -39,15 +39,20 @@ pub struct ApiResponse {
     data: Option<serde_json::Value>,
 }
 
-pub async fn sign_up(user: web::Json<UserAction>, data: web::Data<Arc<AppState>>) -> impl Responder {
+pub async fn sign_up(
+    user: web::Json<UserAction>,
+    data: web::Data<Arc<AppState>>,
+) -> impl Responder {
     let contract = match data.contracts.get(&user.chain_id) {
         Some(c) => c,
-        None => return HttpResponse::BadRequest().json(ApiResponse {
-            status: "error".to_string(),
-            tx_hash: None,
-            message: format!("Unsupported chain ID: {}", user.chain_id),
-            data: None,
-        }),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                status: "error".to_string(),
+                tx_hash: None,
+                message: format!("Unsupported chain ID: {}", user.chain_id),
+                data: None,
+            })
+        }
     };
 
     match contract.sign_up().from(user.address).send().await {
@@ -69,18 +74,29 @@ pub async fn sign_up(user: web::Json<UserAction>, data: web::Data<Arc<AppState>>
     }
 }
 
-pub async fn deposit(deposit: web::Json<Deposit>, data: web::Data<Arc<AppState>>) -> impl Responder {
+pub async fn deposit(
+    deposit: web::Json<Deposit>,
+    data: web::Data<Arc<AppState>>,
+) -> impl Responder {
     let contract = match data.contracts.get(&deposit.chain_id) {
         Some(c) => c,
-        None => return HttpResponse::BadRequest().json(ApiResponse {
-            status: "error".to_string(),
-            tx_hash: None,
-            message: format!("Unsupported chain ID: {}", deposit.chain_id),
-            data: None,
-        }),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                status: "error".to_string(),
+                tx_hash: None,
+                message: format!("Unsupported chain ID: {}", deposit.chain_id),
+                data: None,
+            })
+        }
     };
 
-    match contract.deposit().from(deposit.address).value(deposit.amount).send().await {
+    match contract
+        .deposit()
+        .from(deposit.address)
+        .value(deposit.amount)
+        .send()
+        .await
+    {
         Ok(tx) => {
             let tx_hash = format!("{:?}", tx.tx_hash());
             HttpResponse::Ok().json(ApiResponse {
@@ -99,18 +115,28 @@ pub async fn deposit(deposit: web::Json<Deposit>, data: web::Data<Arc<AppState>>
     }
 }
 
-pub async fn withdraw(withdraw: web::Json<Withdraw>, data: web::Data<Arc<AppState>>) -> impl Responder {
+pub async fn withdraw(
+    withdraw: web::Json<Withdraw>,
+    data: web::Data<Arc<AppState>>,
+) -> impl Responder {
     let contract = match data.contracts.get(&withdraw.chain_id) {
         Some(c) => c,
-        None => return HttpResponse::BadRequest().json(ApiResponse {
-            status: "error".to_string(),
-            tx_hash: None,
-            message: format!("Unsupported chain ID: {}", withdraw.chain_id),
-            data: None,
-        }),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                status: "error".to_string(),
+                tx_hash: None,
+                message: format!("Unsupported chain ID: {}", withdraw.chain_id),
+                data: None,
+            })
+        }
     };
 
-    match contract.withdraw(withdraw.shares).from(withdraw.address).send().await {
+    match contract
+        .withdraw(withdraw.shares)
+        .from(withdraw.address)
+        .send()
+        .await
+    {
         Ok(tx) => {
             let tx_hash = format!("{:?}", tx.tx_hash());
             HttpResponse::Ok().json(ApiResponse {
@@ -129,15 +155,20 @@ pub async fn withdraw(withdraw: web::Json<Withdraw>, data: web::Data<Arc<AppStat
     }
 }
 
-pub async fn get_shares(user: web::Json<UserAction>, data: web::Data<Arc<AppState>>) -> impl Responder {
+pub async fn get_shares(
+    user: web::Json<UserAction>,
+    data: web::Data<Arc<AppState>>,
+) -> impl Responder {
     let contract = match data.contracts.get(&user.chain_id) {
         Some(c) => c,
-        None => return HttpResponse::BadRequest().json(ApiResponse {
-            status: "error".to_string(),
-            tx_hash: None,
-            message: format!("Unsupported chain ID: {}", user.chain_id),
-            data: None,
-        }),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                status: "error".to_string(),
+                tx_hash: None,
+                message: format!("Unsupported chain ID: {}", user.chain_id),
+                data: None,
+            })
+        }
     };
 
     match contract.shares(user.address).call().await {
@@ -156,15 +187,20 @@ pub async fn get_shares(user: web::Json<UserAction>, data: web::Data<Arc<AppStat
     }
 }
 
-pub async fn update_shares(blob: web::Json<BlobUpdate>, data: web::Data<Arc<AppState>>) -> impl Responder {
+pub async fn update_shares(
+    blob: web::Json<BlobUpdate>,
+    data: web::Data<Arc<AppState>>,
+) -> impl Responder {
     let contract = match data.contracts.get(&blob.chain_id) {
         Some(c) => c,
-        None => return HttpResponse::BadRequest().json(ApiResponse {
-            status: "error".to_string(),
-            tx_hash: None,
-            message: format!("Unsupported chain ID: {}", blob.chain_id),
-            data: None,
-        }),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                status: "error".to_string(),
+                tx_hash: None,
+                message: format!("Unsupported chain ID: {}", blob.chain_id),
+                data: None,
+            })
+        }
     };
 
     let event_id = format!("blob_update_{}_{}", blob.chain_id, blob.blob);

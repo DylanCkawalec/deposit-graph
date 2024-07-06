@@ -10,6 +10,6 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("/withdraw", web::post().to(handlers::withdraw))
             .route("/get_shares", web::post().to(handlers::get_shares))
             .route("/update_shares", web::post().to(handlers::update_shares))
-            .route("/test_rpc", web::get().to(handlers::test_rpc))
+            .route("/test_rpc", web::get().to(handlers::test_rpc)),
     );
 }

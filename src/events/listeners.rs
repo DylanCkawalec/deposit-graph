@@ -1,12 +1,12 @@
-use crate::contracts::{AppState, deposit_graph};
+use crate::contracts::{deposit_graph, AppState};
 use actix_web::web;
 use anyhow::Result;
 use ethers::prelude::*;
-use tracing::{info, error};
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
+use tracing::{error, info};
 
 pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
@@ -16,12 +16,20 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()
 
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
-            
-            let withdrawal_filter = contract_clone.withdrawal_requested_filter().from_block(0u64);
+
+            let withdrawal_filter = contract_clone
+                .withdrawal_requested_filter()
+                .from_block(0u64);
             let shares_updated_filter = contract_clone.shares_updated_filter().from_block(0u64);
 
-            let mut withdrawal_stream = withdrawal_filter.stream().await.expect("Failed to create withdrawal event stream");
-            let mut shares_updated_stream = shares_updated_filter.stream().await.expect("Failed to create shares updated event stream");
+            let mut withdrawal_stream = withdrawal_filter
+                .stream()
+                .await
+                .expect("Failed to create withdrawal event stream");
+            let mut shares_updated_stream = shares_updated_filter
+                .stream()
+                .await
+                .expect("Failed to create shares updated event stream");
 
             loop {
                 tokio::select! {
