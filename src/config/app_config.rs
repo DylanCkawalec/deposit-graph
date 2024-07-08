@@ -36,17 +36,17 @@ impl AppConfig {
                     network: "sepolia".to_string(),
                     contract_address_env: "ETHEREUM_SEPOLIA_CONTRACT_ADDRESS".to_string(),
                 },
+                ChainConfig {
+                    chain_id: 11155420,
+                    network: "optimism-sepolia".to_string(),
+                    contract_address_env: "OPTIMISM_SEPOLIA_CONTRACT_ADDRESS".to_string(),
+                },
                 // Commenting out other networks for now
                 /*
                 ChainConfig {
                     chain_id: 84532,
                     network: "base-sepolia".to_string(),
                     contract_address_env: "BASE_SEPOLIA_CONTRACT_ADDRESS".to_string(),
-                },
-                ChainConfig {
-                    chain_id: 11155420,
-                    network: "optimism-sepolia".to_string(),
-                    contract_address_env: "OPTIMISM_SEPOLIA_CONTRACT_ADDRESS".to_string(),
                 },
                 ChainConfig {
                     chain_id: 3441005,

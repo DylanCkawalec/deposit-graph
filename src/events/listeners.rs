@@ -12,7 +12,9 @@ use std::env;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+
 
 pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
@@ -23,43 +25,55 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
-            let withdrawal_filter = contract_clone
-                .withdrawal_requested_filter()
-                .from_block(0u64);
-            let shares_updated_filter = contract_clone.shares_updated_filter().from_block(0u64);
-            let user_signed_up_filter = contract_clone.user_signed_up_filter().from_block(0u64);
-
-            let mut withdrawal_stream = withdrawal_filter
-                .stream()
-                .await
-                .expect("Failed to create withdrawal event stream");
-            let mut shares_updated_stream = shares_updated_filter
-                .stream()
-                .await
-                .expect("Failed to create shares updated event stream");
-            let mut user_signed_up_stream = user_signed_up_filter
-                .stream()
-                .await
-                .expect("Failed to create user signed up event stream");
-
             loop {
-                tokio::select! {
-                    Some(Ok(event)) = withdrawal_stream.next() => {
-                        info!("Received WithdrawalRequested event on chain {}", chain_id_clone);
-                        if let Err(e) = process_withdrawal(event, &processed_events_clone, chain_id_clone).await {
-                            error!("Error processing withdrawal: {:?}", e);
+                let withdrawal_filter = contract_clone
+                    .withdrawal_requested_filter()
+                    .from_block(BlockNumber::Latest);
+                let shares_updated_filter = contract_clone
+                    .shares_updated_filter()
+                    .from_block(BlockNumber::Latest);
+                let user_signed_up_filter = contract_clone
+                    .user_signed_up_filter()
+                    .from_block(BlockNumber::Latest);
+
+                let withdrawal_stream = withdrawal_filter.stream().await;
+                let shares_updated_stream = shares_updated_filter.stream().await;
+                let user_signed_up_stream = user_signed_up_filter.stream().await;
+
+                if let (Ok(mut w_stream), Ok(mut s_stream), Ok(mut u_stream)) = (
+                    withdrawal_stream,
+                    shares_updated_stream,
+                    user_signed_up_stream,
+                ) {
+                    loop {
+                        tokio::select! {
+                            Some(Ok(event)) = w_stream.next() => {
+                                info!("Received WithdrawalRequested event on chain {}", chain_id_clone);
+                                if let Err(e) = process_withdrawal(event, &processed_events_clone, chain_id_clone).await {
+                                    error!("Error processing withdrawal: {:?}", e);
+                                }
+                            }
+                            Some(Ok(event)) = s_stream.next() => {
+                                info!("Shares updated for user {:?}: {} on chain {}", event.user, event.new_shares, chain_id_clone);
+                                if let Err(e) = process_shares_updated(event, chain_id_clone).await {
+                                    error!("Error processing shares update: {:?}", e);
+                                }
+                            }
+                            Some(Ok(event)) = u_stream.next() => {
+                                info!("User signed up: {:?} on chain {}", event.user, chain_id_clone);
+                                if let Err(e) = process_user_signed_up(event, chain_id_clone).await {
+                                    error!("Error processing user sign up: {:?}", e);
+                                }
+                            }
+                            else => break,
                         }
                     }
-                    Some(Ok(event)) = shares_updated_stream.next() => {
-                        info!("Shares updated for user {:?}: {} on chain {}", event.user, event.new_shares, chain_id_clone);
-                        process_shares_updated(event, chain_id_clone).await;
-                    }
-                    Some(Ok(event)) = user_signed_up_stream.next() => {
-                        info!("User signed up: {:?} on chain {}", event.user, chain_id_clone);
-                        process_user_signed_up(event, chain_id_clone).await;
-                    }
-                    else => break,
+                } else {
+                    error!("Failed to create event streams for chain ID: {}", chain_id_clone);
                 }
+
+                // Wait for a short period before restarting the loop
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
     }
@@ -133,24 +147,7 @@ async fn process_withdrawal(
     Ok(())
 }
 
-// ... (keep the rest of the functions as they are)
-
-fn get_rpc_url_for_chain(chain_id: U256) -> Result<String> {
-    match chain_id.as_u64() {
-        11155111 => {
-            env::var("ETHEREUM_SEPOLIA_RPC_URL").context("ETHEREUM_SEPOLIA_RPC_URL must be set")
-        }
-        84532 => env::var("BASE_SEPOLIA_RPC_URL").context("BASE_SEPOLIA_RPC_URL must be set"),
-        11155420 => {
-            env::var("OPTIMISM_SEPOLIA_RPC_URL").context("OPTIMISM_SEPOLIA_RPC_URL must be set")
-        }
-        3441005 => env::var("MANTA_PACIFIC_SEPOLIA_RPC_URL")
-            .context("MANTA_PACIFIC_SEPOLIA_RPC_URL must be set"),
-        _ => Err(anyhow::anyhow!("Unsupported chain ID: {}", chain_id)),
-    }
-}
-
-async fn process_shares_updated(event: deposit_graph::SharesUpdatedFilter, chain_id: U256) {
+async fn process_shares_updated(event: deposit_graph::SharesUpdatedFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
         "event_type": "SharesUpdated",
         "chain_id": chain_id.to_string(),
@@ -159,12 +156,10 @@ async fn process_shares_updated(event: deposit_graph::SharesUpdatedFilter, chain
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    if let Err(e) = save_event_to_file(&event_json, "events").await {
-        error!("Error saving SharesUpdated event: {:?}", e);
-    }
+    save_event_to_file(&event_json, "events").await
 }
 
-async fn process_user_signed_up(event: deposit_graph::UserSignedUpFilter, chain_id: U256) {
+async fn process_user_signed_up(event: deposit_graph::UserSignedUpFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
         "event_type": "UserSignedUp",
         "chain_id": chain_id.to_string(),
@@ -172,8 +167,16 @@ async fn process_user_signed_up(event: deposit_graph::UserSignedUpFilter, chain_
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    if let Err(e) = save_event_to_file(&event_json, "events").await {
-        error!("Error saving UserSignedUp event: {:?}", e);
+    save_event_to_file(&event_json, "events").await
+}
+
+fn get_rpc_url_for_chain(chain_id: U256) -> Result<String> {
+    match chain_id.as_u64() {
+        11155111 => env::var("ETHEREUM_SEPOLIA_RPC_URL").context("ETHEREUM_SEPOLIA_RPC_URL must be set"),
+        84532 => env::var("BASE_SEPOLIA_RPC_URL").context("BASE_SEPOLIA_RPC_URL must be set"),
+        11155420 => env::var("OPTIMISM_SEPOLIA_RPC_URL").context("OPTIMISM_SEPOLIA_RPC_URL must be set"),
+        3441005 => env::var("MANTA_PACIFIC_SEPOLIA_RPC_URL").context("MANTA_PACIFIC_SEPOLIA_RPC_URL must be set"),
+        _ => Err(anyhow::anyhow!("Unsupported chain ID: {}", chain_id)),
     }
 }
 
@@ -181,24 +184,39 @@ async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Res
     let events_dir = format!("deposit-graph/{}", folder);
     fs::create_dir_all(&events_dir)?;
 
-    let filename = format!(
-        "{}/event_{}.json",
-        events_dir,
-        chrono::Utc::now().timestamp_millis()
-    );
-    fs::write(&filename, serde_json::to_string_pretty(event_json)?)?;
-    info!("Event saved to file: {}", filename);
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
+    let user = event_json["user"].as_str().unwrap_or("unknown");
+    
+    let filename = format!("event_{}_{}_{}_{}.json", event_type, user, timestamp, fastrand::u64(..));
+    let file_path = format!("{}/{}", events_dir, filename);
+
+    fs::write(&file_path, serde_json::to_string_pretty(event_json)?)?;
+    info!("Event saved to file: {}", file_path);
 
     Ok(())
 }
 
-async fn move_event_to_processed(_event_json: &serde_json::Value) -> Result<()> {
+async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
     let timestamp = chrono::Utc::now().timestamp_millis();
-    let source_path = format!("deposit-graph/events/event_{}.json", timestamp);
-    let dest_path = format!("deposit-graph/events-finished/event_{}.json", timestamp);
+    let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
+    let user = event_json["user"].as_str().unwrap_or("unknown");
+    
+    let filename = format!("event_{}_{}_{}_{}.json", event_type, user, timestamp, fastrand::u64(..));
+    
+    let source_path = format!("deposit-graph/events/{}", filename);
+    let dest_path = format!("deposit-graph/events-finished/{}", filename);
 
-    fs::rename(&source_path, &dest_path)?;
-    info!("Moved event file from {} to {}", source_path, dest_path);
+    // Ensure the destination directory exists
+    fs::create_dir_all("deposit-graph/events-finished")?;
+
+    // Check if the source file exists before attempting to move it
+    if fs::metadata(&source_path).is_ok() {
+        fs::rename(&source_path, &dest_path)?;
+        info!("Moved event file from {} to {}", source_path, dest_path);
+    } else {
+        warn!("Source file {} does not exist, skipping move operation", source_path);
+    }
 
     Ok(())
 }
