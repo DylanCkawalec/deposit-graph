@@ -4,18 +4,27 @@ use deposit_graph::{
     contracts::{self, AppState},
     events,
 };
+
 use std::collections::HashMap;
+use std::env;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
-use std::path::Path;
-use std::env;
 
 fn print_all_env_vars() {
     for (key, value) in env::vars() {
-        println!("{}: {}", key, if key.contains("KEY") || key.contains("PRIVATE") { "[REDACTED]" } else { &value });
+        println!(
+            "{}: {}",
+            key,
+            if key.contains("KEY") || key.contains("PRIVATE") {
+                "[REDACTED]"
+            } else {
+                &value
+            }
+        );
     }
 }
 
@@ -27,17 +36,65 @@ fn print_env_file_contents(path: &str) {
                 if !line.starts_with('#') && !line.is_empty() {
                     let parts: Vec<&str> = line.splitn(2, '=').collect();
                     if parts.len() == 2 {
-                        println!("  {}: {}", parts[0], if parts[0].contains("KEY") { "[REDACTED]" } else { parts[1] });
+                        println!(
+                            "  {}: {}",
+                            parts[0],
+                            if parts[0].contains("KEY") {
+                                "[REDACTED]"
+                            } else {
+                                parts[1]
+                            }
+                        );
                     }
                 }
             }
-        },
+        }
         Err(e) => println!("Failed to read {}: {}", path, e),
+    }
+}
+
+fn load_env_file() {
+    let current_dir = env::current_dir().expect("Failed to get current directory");
+    let mut dir = current_dir.as_path();
+
+    loop {
+        let env_path = dir.join(".env");
+        if env_path.exists() {
+            println!("Found .env file at: {}", env_path.display());
+            let content = fs::read_to_string(&env_path).expect("Failed to read .env file");
+            for line in content.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    if !key.starts_with('#') && !key.is_empty() {
+                        env::set_var(key, value);
+                        if key.contains("KEY") || key.contains("PRIVATE") {
+                            println!("Set environment variable: {} = [REDACTED]", key);
+                        } else {
+                            println!("Set environment variable: {} = {}", key, value);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(parent) = dir.parent() {
+            dir = parent;
+        } else {
+            println!("Could not find .env file in any parent directory");
+            return;
+        }
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    load_env_file();
+
+    println!("All environment variables after loading .env:");
+    print_all_env_vars();
+
     let env_paths = vec![".env", "../.env", "../../.env"];
     for path in env_paths {
         if Path::new(path).exists() {

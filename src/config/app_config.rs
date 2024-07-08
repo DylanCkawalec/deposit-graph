@@ -1,4 +1,4 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::env;
 
@@ -21,7 +21,7 @@ pub struct ChainConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         println!("Loading configuration from environment variables");
-        
+
         let config = Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
@@ -59,13 +59,19 @@ impl AppConfig {
 
         println!("Chain configurations:");
         for chain_config in &config.chain_configs {
-            println!("Chain ID: {}, Network: {}, Contract Address Env: {}", 
-                     chain_config.chain_id, chain_config.network, chain_config.contract_address_env);
-            
-            // Print the value of the contract address environment variable
+            println!(
+                "Chain ID: {}, Network: {}, Contract Address Env: {}",
+                chain_config.chain_id, chain_config.network, chain_config.contract_address_env
+            );
             match env::var(&chain_config.contract_address_env) {
-                Ok(value) => println!("  {} value: {}", chain_config.contract_address_env, value),
-                Err(_) => println!("  {} is not set", chain_config.contract_address_env),
+                Ok(address) => println!(
+                    "  {} is set to: {}",
+                    chain_config.contract_address_env, address
+                ),
+                Err(e) => println!(
+                    "  Error reading {}: {:?}",
+                    chain_config.contract_address_env, e
+                ),
             }
         }
 

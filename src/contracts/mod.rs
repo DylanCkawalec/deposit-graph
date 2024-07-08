@@ -9,9 +9,9 @@ use ethers::{
     types::U256,
 };
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::env;
 
 pub use deposit_graph::DepositGraph;
 
@@ -27,8 +27,11 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
     let mut contracts = HashMap::new();
 
     for chain_config in &config.chain_configs {
-        println!("Initializing contract for chain ID: {}", chain_config.chain_id);
-        
+        println!(
+            "Initializing contract for chain ID: {}",
+            chain_config.chain_id
+        );
+
         let rpc_url = format!(
             "https://lb.drpc.org/ogrpc?network={}&dkey={}",
             chain_config.network, config.drpc_api_key
@@ -37,22 +40,31 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
         let wallet: LocalWallet = config.private_key.parse()?;
         let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
 
-        println!("Attempting to read environment variable: {}", chain_config.contract_address_env);
-        println!("Current value: {:?}", std::env::var(&chain_config.contract_address_env));
+        println!(
+            "Attempting to read environment variable: {}",
+            chain_config.contract_address_env
+        );
+        let contract_address =
+            std::env::var(&chain_config.contract_address_env).with_context(|| {
+                format!(
+                    "Missing environment variable: {}. All env vars: {:?}",
+                    chain_config.contract_address_env,
+                    std::env::vars().collect::<HashMap<_, _>>()
+                )
+            })?;
+        println!(
+            "Contract address for chain {}: {}",
+            chain_config.chain_id, contract_address
+        );
 
-        let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
-            format!(
-                "Missing environment variable: {}",
-                chain_config.contract_address_env
-            )
-        })?;
-        println!("Contract address for chain {}: {}", chain_config.chain_id, contract_address);
-        
         let contract_address: ethers::types::Address = contract_address.parse()?;
         let contract = DepositGraph::new(contract_address, Arc::new(client));
 
         contracts.insert(U256::from(chain_config.chain_id), Arc::new(contract));
-        println!("Contract initialized for chain ID: {}", chain_config.chain_id);
+        println!(
+            "Contract initialized for chain ID: {}",
+            chain_config.chain_id
+        );
     }
 
     Ok(contracts)

@@ -1,15 +1,15 @@
 use crate::contracts::{deposit_graph, AppState};
 use actix_web::web;
 use anyhow::Result;
+use chrono::Utc;
 use ethers::prelude::*;
 use futures::StreamExt;
+use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
-use std::fs;
-use serde_json::json;
-use chrono::Utc;
 
 pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
@@ -101,7 +101,7 @@ async fn process_shares_updated(
         "SharesUpdated event on chain {}: User: {:?}, New Shares: {}, Chain ID: {}",
         chain_id, event.user, event.new_shares, event.chain_id
     );
-    
+
     let event_json = json!({
         "event_type": "SharesUpdated",
         "chain_id": chain_id.to_string(),
@@ -117,7 +117,11 @@ async fn save_event_to_file(event_json: serde_json::Value) -> Result<()> {
     let events_dir = "events";
     fs::create_dir_all(events_dir)?;
 
-    let filename = format!("{}/event_{}.json", events_dir, Utc::now().timestamp_millis());
+    let filename = format!(
+        "{}/event_{}.json",
+        events_dir,
+        Utc::now().timestamp_millis()
+    );
     fs::write(&filename, event_json.to_string())?;
     info!("Event saved to file: {}", filename);
 
