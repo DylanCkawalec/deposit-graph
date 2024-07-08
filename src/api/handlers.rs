@@ -19,9 +19,9 @@ pub struct UserAction {
 
 #[derive(Deserialize)]
 pub struct Deposit {
-    address: Address,
-    amount: U256,
-    chain_id: U256,
+    pub address: Address,
+    pub amount: U256,
+    pub chain_id: U256,
 }
 
 #[derive(Deserialize)]
@@ -91,9 +91,9 @@ pub async fn deposit(
     };
 
     match contract
-        .deposit()
+        .deposit(deposit.amount) // Pass the amount to the deposit function
         .from(deposit.address)
-        .value(deposit.amount)
+        .value(deposit.amount) // The value sent should match the deposit amount
         .send()
         .await
     {

@@ -133,6 +133,8 @@ async fn process_withdrawal(
     Ok(())
 }
 
+// ... (keep the rest of the functions as they are)
+
 fn get_rpc_url_for_chain(chain_id: U256) -> Result<String> {
     match chain_id.as_u64() {
         11155111 => {
