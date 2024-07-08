@@ -131,10 +131,13 @@ async fn main() -> std::io::Result<()> {
         drpc_api_key: config.drpc_api_key.clone(),
     }));
 
+    let app_config = web::Data::new(config.clone());  // Clone config here
+
     let app_state_clone = app_state.clone();
+    let app_config_clone = app_config.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = events::listen_for_events(app_state_clone).await {
+        if let Err(e) = events::listen_for_events(app_state_clone, app_config_clone).await {
             error!("Error in event listener: {:?}", e);
         }
     });
@@ -143,6 +146,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .app_data(app_config.clone())
             .configure(api::config)
     })
     .bind((config.host.clone(), config.port))?

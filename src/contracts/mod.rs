@@ -31,10 +31,7 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
             chain_config.chain_id
         );
 
-        let rpc_url = format!(
-            "https://lb.drpc.org/ogrpc?network={}&dkey={}",
-            chain_config.network, config.drpc_api_key
-        );
+        let rpc_url = config.get_rpc_url(chain_config.chain_id)?;
         let provider = Provider::<Http>::try_from(rpc_url)?;
         let wallet: LocalWallet = config.private_key.parse()?;
         let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
@@ -43,14 +40,13 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
             "Attempting to read environment variable: {}",
             chain_config.contract_address_env
         );
-        let contract_address =
-            std::env::var(&chain_config.contract_address_env).with_context(|| {
-                format!(
-                    "Missing environment variable: {}. All env vars: {:?}",
-                    chain_config.contract_address_env,
-                    std::env::vars().collect::<HashMap<_, _>>()
-                )
-            })?;
+        let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
+            format!(
+                "Missing environment variable: {}. All env vars: {:?}",
+                chain_config.contract_address_env,
+                std::env::vars().collect::<HashMap<_, _>>()
+            )
+        })?;
         println!(
             "Contract address for chain {}: {}",
             chain_config.chain_id, contract_address
