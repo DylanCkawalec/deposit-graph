@@ -132,7 +132,7 @@ pub async fn withdraw(
     };
 
     match contract
-        .withdraw(withdraw.shares)
+        .request_withdrawal(withdraw.shares)
         .from(withdraw.address)
         .send()
         .await
@@ -142,14 +142,14 @@ pub async fn withdraw(
             HttpResponse::Ok().json(ApiResponse {
                 status: "success".to_string(),
                 tx_hash: Some(tx_hash),
-                message: "Withdrawal successful".to_string(),
+                message: "Withdrawal request successful".to_string(),
                 data: None,
             })
         }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             status: "error".to_string(),
             tx_hash: None,
-            message: format!("Error withdrawing: {:?}", e),
+            message: format!("Error requesting withdrawal: {:?}", e),
             data: None,
         }),
     }

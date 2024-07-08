@@ -9,7 +9,6 @@ use ethers::{
     types::U256,
 };
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
