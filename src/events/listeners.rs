@@ -1,4 +1,4 @@
-use crate::contracts::{deposit_graph, AppState};
+use crate::contracts::{AppState, ContractType};
 use actix_web::web;
 use anyhow::Result;
 use ethers::prelude::*;
@@ -7,42 +7,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
+use std::fs::OpenOptions;
+use std::io::Write;
+use chrono::Utc;
 
 pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
         let contract_clone = contract.clone();
-        let processed_events_clone = app_state.processed_events.clone();
         let chain_id_clone = *chain_id;
 
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
+            
+            let events = contract_clone.events();
+            let mut stream = events.stream().await.expect("Failed to create event stream");
 
-            let withdrawal_filter = contract_clone
-                .withdrawal_requested_filter()
-                .from_block(0u64);
-            let shares_updated_filter = contract_clone.shares_updated_filter().from_block(0u64);
-
-            let mut withdrawal_stream = withdrawal_filter
-                .stream()
-                .await
-                .expect("Failed to create withdrawal event stream");
-            let mut shares_updated_stream = shares_updated_filter
-                .stream()
-                .await
-                .expect("Failed to create shares updated event stream");
-
-            loop {
-                tokio::select! {
-                    Some(Ok(event)) = withdrawal_stream.next() => {
-                        info!("Received WithdrawalRequested event on chain {}", chain_id_clone);
-                        if let Err(e) = process_withdrawal(event, &processed_events_clone, chain_id_clone).await {
-                            error!("Error processing withdrawal: {:?}", e);
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(event) => {
+                        match event {
+                            ContractType::Events::SharesUpdatedFilter(update) => {
+                                info!("SharesUpdated event: user {:?}, new shares: {}, chain ID: {}", 
+                                      update.user, update.new_shares, update.chain_id);
+                                log_event("SharesUpdated", &format!("User: {:?}, New Shares: {}, Chain ID: {}", 
+                                          update.user, update.new_shares, update.chain_id));
+                            },
+                            ContractType::Events::WithdrawalRequestedFilter(withdrawal) => {
+                                info!("WithdrawalRequested event: user {:?}, shares withdrawn: {}, ETH amount: {}, chain ID: {}", 
+                                      withdrawal.user, withdrawal.shares_withdrawn, withdrawal.eth_amount, withdrawal.chain_id);
+                                log_event("WithdrawalRequested", &format!("User: {:?}, Shares Withdrawn: {}, ETH Amount: {}, Chain ID: {}", 
+                                          withdrawal.user, withdrawal.shares_withdrawn, withdrawal.eth_amount, withdrawal.chain_id));
+                            },
+                            ContractType::Events::ChainIdSetFilter(chain_id_set) => {
+                                info!("ChainIdSet event: new chain ID: {}", chain_id_set.chain_id);
+                                log_event("ChainIdSet", &format!("New Chain ID: {}", chain_id_set.chain_id));
+                            },
                         }
-                    }
-                    Some(Ok(event)) = shares_updated_stream.next() => {
-                        info!("Shares updated for user {:?}: {} on chain {}", event.user, event.new_shares, chain_id_clone);
-                    }
-                    else => break,
+                    },
+                    Err(e) => error!("Error in event stream for chain {}: {:?}", chain_id_clone, e),
                 }
             }
         });
@@ -50,30 +52,17 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>) -> Result<()
     Ok(())
 }
 
-async fn process_withdrawal(
-    withdrawal: deposit_graph::WithdrawalRequestedFilter,
-    processed_events: &Arc<RwLock<HashMap<String, bool>>>,
-    chain_id: U256,
-) -> Result<()> {
-    let event_id = format!(
-        "withdrawal_{}_{}_{}_{}",
-        chain_id, withdrawal.user, withdrawal.shares_withdrawn, withdrawal.eth_amount
-    );
-    let mut events = processed_events.write().await;
+fn log_event(event_type: &str, details: &str) {
+    let timestamp = Utc::now().to_rfc3339();
+    let log_entry = format!("[{}] {}: {}\n", timestamp, event_type, details);
+    
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("event_log.txt")
+        .expect("Failed to open log file");
 
-    if events.contains_key(&event_id) {
-        info!("Withdrawal already processed: {}", event_id);
-        return Ok(());
+    if let Err(e) = file.write_all(log_entry.as_bytes()) {
+        error!("Failed to write to log file: {:?}", e);
     }
-
-    info!(
-        "Processing withdrawal for user {:?}, shares: {}, amount: {} on chain {}",
-        withdrawal.user, withdrawal.shares_withdrawn, withdrawal.eth_amount, chain_id
-    );
-
-    // Note: The actual transfer of ETH should be handled by the contract itself.
-    // This function is mainly for logging and tracking purposes.
-    events.insert(event_id, true);
-
-    Ok(())
 }

@@ -65,7 +65,6 @@ async fn main() -> std::io::Result<()> {
     }));
 
     let app_state_clone = app_state.clone();
-
     tokio::spawn(async move {
         if let Err(e) = events::listen_for_events(app_state_clone).await {
             error!("Error in event listener: {:?}", e);

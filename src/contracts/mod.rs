@@ -6,12 +6,12 @@ use ethers::{
     middleware::SignerMiddleware,
     providers::{Http, Provider},
     signers::{LocalWallet, Signer},
-    types::U256,
+    types::{Address, U256},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-//use std::env;
+use std::env;
 
 pub use deposit_graph::DepositGraph;
 
@@ -37,15 +37,11 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
         let wallet: LocalWallet = config.private_key.parse()?;
         let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
 
-        let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
-            format!(
-                "Missing environment variable: {}",
-                chain_config.contract_address_env
-            )
-        })?;
+        let contract_address = env::var(&chain_config.contract_address_env)
+            .with_context(|| format!("Missing environment variable: {}", chain_config.contract_address_env))?;
         println!("Contract address for chain {}: {}", chain_config.chain_id, contract_address);
         
-        let contract_address: ethers::types::Address = contract_address.parse()?;
+        let contract_address: Address = contract_address.parse()?;
         let contract = DepositGraph::new(contract_address, Arc::new(client));
 
         contracts.insert(U256::from(chain_config.chain_id), Arc::new(contract));
