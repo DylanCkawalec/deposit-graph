@@ -11,6 +11,13 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 use std::path::Path;
+use std::env;
+
+fn print_all_env_vars() {
+    for (key, value) in env::vars() {
+        println!("{}: {}", key, if key.contains("KEY") || key.contains("PRIVATE") { "[REDACTED]" } else { &value });
+    }
+}
 
 fn print_env_file_contents(path: &str) {
     match fs::read_to_string(path) {
@@ -40,6 +47,9 @@ async fn main() -> std::io::Result<()> {
             break;
         }
     }
+
+    println!("All environment variables after loading .env:");
+    print_all_env_vars();
 
     let config = config::AppConfig::from_env().expect("Failed to load configuration");
 

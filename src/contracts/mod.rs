@@ -37,6 +37,9 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
         let wallet: LocalWallet = config.private_key.parse()?;
         let client = SignerMiddleware::new(provider, wallet.with_chain_id(chain_config.chain_id));
 
+        println!("Attempting to read environment variable: {}", chain_config.contract_address_env);
+        println!("Current value: {:?}", std::env::var(&chain_config.contract_address_env));
+
         let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
             format!(
                 "Missing environment variable: {}",
