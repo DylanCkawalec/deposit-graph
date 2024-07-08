@@ -5,7 +5,6 @@ use deposit_graph::{
     events,
 };
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,21 +12,21 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 use std::path::Path;
 
-fn load_env_file(path: &str) -> std::io::Result<()> {
-    let contents = fs::read_to_string(path)?;
-    println!("Contents of {}:", path);
-    for line in contents.lines() {
-        if !line.starts_with('#') && !line.is_empty() {
-            let parts: Vec<&str> = line.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                let key = parts[0].trim();
-                let value = parts[1].trim();
-                println!("  {}: {}", key, if key.contains("KEY") { "[REDACTED]" } else { value });
-                env::set_var(key, value);
+fn print_env_file_contents(path: &str) {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            println!("Contents of {}:", path);
+            for line in contents.lines() {
+                if !line.starts_with('#') && !line.is_empty() {
+                    let parts: Vec<&str> = line.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        println!("  {}: {}", parts[0], if parts[0].contains("KEY") { "[REDACTED]" } else { parts[1] });
+                    }
+                }
             }
-        }
+        },
+        Err(e) => println!("Failed to read {}: {}", path, e),
     }
-    Ok(())
 }
 
 #[actix_web::main]
@@ -35,7 +34,8 @@ async fn main() -> std::io::Result<()> {
     let env_paths = vec![".env", "../.env", "../../.env"];
     for path in env_paths {
         if Path::new(path).exists() {
-            load_env_file(path)?;
+            print_env_file_contents(path);
+            dotenv::from_path(path).ok();
             println!("Loaded .env from {}", path);
             break;
         }
@@ -65,6 +65,7 @@ async fn main() -> std::io::Result<()> {
     }));
 
     let app_state_clone = app_state.clone();
+
     tokio::spawn(async move {
         if let Err(e) = events::listen_for_events(app_state_clone).await {
             error!("Error in event listener: {:?}", e);
