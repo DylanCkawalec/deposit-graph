@@ -1,4 +1,5 @@
 pub mod deposit_graph;
+pub use deposit_graph::*;
 
 use crate::config::AppConfig;
 use anyhow::{Context, Result};

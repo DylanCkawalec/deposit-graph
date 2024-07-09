@@ -1,11 +1,8 @@
 use crate::config::AppConfig;
-use crate::contracts::deposit_graph::{
-    SharesUpdatedFilter, UserSignedUpFilter, WithdrawalRequestedFilter,
-};
+
 use crate::contracts::{AppState, ContractType};
 use actix_web::web;
 use anyhow::{Context, Result};
-use ethers::prelude::*;
 use ethers::providers::Middleware;
 use serde_json::json;
 use std::collections::HashMap;
@@ -14,6 +11,16 @@ use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+use ethers::types::{TransactionRequest, U256};
+use ethers::signers::Signer;
+use ethers::middleware::SignerMiddleware;
+use ethers::signers::LocalWallet;
+use ethers::providers::{Provider, Http};
+use crate::contracts::{
+    WithdrawalRequestedFilter,
+    SharesUpdatedFilter,
+    UserSignedUpFilter,
+};
 
 async fn verify_chain_id<M: Middleware>(provider: &M, expected_chain_id: u64) -> Result<()>
 where
@@ -30,10 +37,8 @@ where
     Ok(())
 }
 
-pub async fn listen_for_events(
-    app_state: web::Data<Arc<AppState>>,
-    app_config: web::Data<AppConfig>,
-) -> Result<()> {
+
+pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: web::Data<AppConfig>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
         let contract_clone = contract.clone();
         let processed_events_clone = app_state.processed_events.clone();
@@ -43,60 +48,33 @@ pub async fn listen_for_events(
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
-            // Verify chain ID
-            if let Err(e) =
-                verify_chain_id(contract_clone.client().as_ref(), chain_id_clone.as_u64()).await
-            {
-                error!(
-                    "Chain ID verification failed for chain {}: {:?}",
-                    chain_id_clone, e
-                );
-                return;
-            }
-            info!("Chain ID verified for chain {}", chain_id_clone);
-
             let mut last_processed_block = match contract_clone.client().get_block_number().await {
                 Ok(block) => block.as_u64(),
                 Err(e) => {
-                    error!(
-                        "Failed to get initial block number for chain {}: {:?}",
-                        chain_id_clone, e
-                    );
+                    error!("Failed to get initial block number for chain {}: {:?}", chain_id_clone, e);
                     return;
                 }
             };
 
-            info!(
-                "Initial block number for chain {}: {}",
-                chain_id_clone, last_processed_block
-            );
+            info!("Initial block number for chain {}: {}", chain_id_clone, last_processed_block);
 
             loop {
                 let latest_block = match contract_clone.client().get_block_number().await {
                     Ok(block) => block.as_u64(),
                     Err(e) => {
-                        error!(
-                            "Failed to get latest block for chain {}: {:?}",
-                            chain_id_clone, e
-                        );
+                        error!("Failed to get latest block for chain {}: {:?}", chain_id_clone, e);
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         continue;
                     }
                 };
 
-                info!(
-                    "Latest block for chain {}: {}",
-                    chain_id_clone, latest_block
-                );
+                info!("Latest block for chain {}: {}", chain_id_clone, latest_block);
 
                 if latest_block > last_processed_block {
                     let from_block = last_processed_block + 1;
                     let to_block = latest_block;
 
-                    info!(
-                        "Processing blocks {} to {} for chain {}",
-                        from_block, to_block, chain_id_clone
-                    );
+                    info!("Processing blocks {} to {} for chain {}", from_block, to_block, chain_id_clone);
 
                     let withdrawal_filter = contract_clone
                         .withdrawal_requested_filter()
@@ -111,7 +89,7 @@ pub async fn listen_for_events(
                         .from_block(from_block)
                         .to_block(to_block);
 
-                    match process_events(
+                    if let Err(e) = process_events(
                         &contract_clone,
                         withdrawal_filter,
                         shares_updated_filter,
@@ -119,26 +97,14 @@ pub async fn listen_for_events(
                         &processed_events_clone,
                         chain_id_clone,
                         &app_config_clone,
-                    )
-                    .await
-                    {
-                        Ok(event_count) => {
-                            info!(
-                                "Processed {} events for chain {} from block {} to {}",
-                                event_count, chain_id_clone, from_block, to_block
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                "Error processing events for chain {}: {:?}",
-                                chain_id_clone, e
-                            );
-                        }
+                    ).await {
+                        error!("Error processing events for chain {}: {:?}", chain_id_clone, e);
                     }
 
+                    info!("Finished processing blocks for chain {}", chain_id_clone);
                     last_processed_block = to_block;
                 } else {
-                    warn!("No new blocks to process for chain {}", chain_id_clone);
+                    info!("No new blocks to process for chain {}", chain_id_clone);
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -148,6 +114,9 @@ pub async fn listen_for_events(
     Ok(())
 }
 
+
+
+
 async fn process_events<M: Middleware + 'static>(
     _contract: &Arc<ContractType>,
     withdrawal_filter: ethers::contract::Event<Arc<M>, M, WithdrawalRequestedFilter>,
@@ -156,7 +125,7 @@ async fn process_events<M: Middleware + 'static>(
     processed_events: &Arc<RwLock<HashMap<String, bool>>>,
     chain_id: U256,
     app_config: &AppConfig,
-) -> Result<usize> {
+) -> Result<usize>  {
     let withdrawal_events = withdrawal_filter.query().await?;
     let shares_updated_events = shares_updated_filter.query().await?;
     let user_signed_up_events = user_signed_up_filter.query().await?;
@@ -164,6 +133,7 @@ async fn process_events<M: Middleware + 'static>(
     let mut event_count = 0;
 
     for event in withdrawal_events {
+        info!("Received WithdrawalRequested event: {:?}", event);
         if let Err(e) = process_withdrawal(event, processed_events, chain_id, app_config).await {
             error!("Error processing withdrawal on chain {}: {:?}", chain_id, e);
         } else {
@@ -202,6 +172,8 @@ async fn process_withdrawal(
     chain_id: U256,
     app_config: &AppConfig,
 ) -> Result<()> {
+    info!("Processing WithdrawalRequested event: {:?}", withdrawal);
+
     let event_id = format!(
         "withdrawal_{}_{}_{}_{}",
         chain_id, withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount
@@ -224,23 +196,43 @@ async fn process_withdrawal(
 
     // Get the RPC URL for the current chain
     let rpc_url = app_config.get_rpc_url(chain_id.as_u64())?;
+    info!("Using RPC URL: {}", rpc_url);
 
     // Create a provider and connect the wallet
     let provider = Provider::<Http>::try_from(rpc_url)?;
     let client = SignerMiddleware::new(provider, wallet.clone().with_chain_id(chain_id.as_u64()));
 
-    // Send tokens to the user
-    let tx = client
-        .send_transaction(
-            TransactionRequest::new()
-                .to(withdrawal.user)
-                .value(withdrawal.token_amount)
-                .from(wallet.address()),
-            None,
-        )
-        .await?;
+    // Verify the chain ID
+    verify_chain_id(&client, chain_id.as_u64()).await?;
 
-    info!("Sent withdrawal transaction: {:?}", tx);
+    info!("Wallet address: {:?}", wallet.address());
+
+    // Check if the wallet has enough balance
+    let balance = client.get_balance(wallet.address(), None).await?;
+    if balance < withdrawal.token_amount {
+        return Err(anyhow::anyhow!("Insufficient balance to process withdrawal"));
+    }
+
+    // Prepare the transaction
+    let tx = TransactionRequest::new()
+        .to(withdrawal.user)
+        .value(withdrawal.token_amount)
+        .from(wallet.address());
+
+    // Send the transaction
+    let pending_tx = client.send_transaction(tx, None).await?;
+    let tx_hash = pending_tx.tx_hash();
+
+    info!("Sent withdrawal transaction: {:?}", tx_hash);
+
+    // Wait for the transaction to be mined
+    let receipt = pending_tx.await?;
+
+    if let Some(receipt) = receipt {
+        info!("Transaction mined in block: {:?}", receipt.block_number);
+    } else {
+        warn!("Transaction failed or not mined: {:?}", tx_hash);
+    }
 
     // Save event to file
     let event_json = json!({
@@ -250,7 +242,7 @@ async fn process_withdrawal(
         "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
         "token_amount": withdrawal.token_amount.to_string(),
         "contract_chain_id": withdrawal.chain_id.to_string(),
-        "tx_hash": format!("{:?}", tx.tx_hash()),
+        "tx_hash": format!("{:?}", tx_hash),
     });
 
     save_event_to_file(&event_json, "events").await?;
@@ -264,7 +256,6 @@ async fn process_withdrawal(
     Ok(())
 }
 
-// ... (rest of the file remains unchanged)
 
 async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
