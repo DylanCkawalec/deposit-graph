@@ -1,8 +1,0 @@
-{
-  "amount": "300000000000000",
-  "chain_id": "11155111",
-  "contract_chain_id": "112",
-  "event_type": "Deposit",
-  "new_shares": "187925992838425",
-  "user": "0x1ae08ac4dc06a1452de15dfb3b3c7ba8e262031c"
-}
