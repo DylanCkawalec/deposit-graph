@@ -1,6 +1,11 @@
 use crate::config::AppConfig;
-
 use crate::contracts::{AppState, ContractType};
+use crate::contracts::{
+    WithdrawalRequestedFilter,
+    SharesUpdatedFilter,
+    UserSignedUpFilter,
+    DepositFilter
+};
 use actix_web::web;
 use anyhow::{Context, Result};
 use ethers::providers::Middleware;
@@ -10,17 +15,13 @@ use std::env;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use ethers::types::{TransactionRequest, U256};
 use ethers::signers::Signer;
 use ethers::middleware::SignerMiddleware;
 use ethers::signers::LocalWallet;
 use ethers::providers::{Provider, Http};
-use crate::contracts::{
-    WithdrawalRequestedFilter,
-    SharesUpdatedFilter,
-    UserSignedUpFilter,
-};
+use std::ops::Deref;
 
 async fn verify_chain_id<M: Middleware>(provider: &M, expected_chain_id: u64) -> Result<()>
 where
@@ -37,7 +38,6 @@ where
     Ok(())
 }
 
-
 pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: web::Data<AppConfig>) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
         let contract_clone = contract.clone();
@@ -48,18 +48,17 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
-            let mut last_processed_block = match contract_clone.client().get_block_number().await {
-                Ok(block) => block.as_u64(),
-                Err(e) => {
-                    error!("Failed to get initial block number for chain {}: {:?}", chain_id_clone, e);
-                    return;
-                }
-            };
-
-            info!("Initial block number for chain {}: {}", chain_id_clone, last_processed_block);
+            let mut last_processed_block = 0u64;
 
             loop {
-                let latest_block = match contract_clone.client().get_block_number().await {
+                let provider = contract_clone.client();
+                if let Err(e) = verify_chain_id(provider.deref(), chain_id_clone.as_u64()).await {
+                    error!("Chain ID verification failed: {:?}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    continue;
+                }
+
+                let latest_block = match provider.get_block_number().await {
                     Ok(block) => block.as_u64(),
                     Err(e) => {
                         error!("Failed to get latest block for chain {}: {:?}", chain_id_clone, e);
@@ -68,32 +67,23 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                     }
                 };
 
-                info!("Latest block for chain {}: {}", chain_id_clone, latest_block);
-
                 if latest_block > last_processed_block {
                     let from_block = last_processed_block + 1;
                     let to_block = latest_block;
 
                     info!("Processing blocks {} to {} for chain {}", from_block, to_block, chain_id_clone);
 
-                    let withdrawal_filter = contract_clone
-                        .withdrawal_requested_filter()
-                        .from_block(from_block)
-                        .to_block(to_block);
-                    let shares_updated_filter = contract_clone
-                        .shares_updated_filter()
-                        .from_block(from_block)
-                        .to_block(to_block);
-                    let user_signed_up_filter = contract_clone
-                        .user_signed_up_filter()
-                        .from_block(from_block)
-                        .to_block(to_block);
+                    let withdrawal_filter = contract_clone.withdrawal_requested_filter().from_block(from_block).to_block(to_block);
+                    let shares_updated_filter = contract_clone.shares_updated_filter().from_block(from_block).to_block(to_block);
+                    let user_signed_up_filter = contract_clone.user_signed_up_filter().from_block(from_block).to_block(to_block);
+                    let deposit_filter = contract_clone.deposit_filter().from_block(from_block).to_block(to_block);
 
                     if let Err(e) = process_events(
                         &contract_clone,
                         withdrawal_filter,
                         shares_updated_filter,
                         user_signed_up_filter,
+                        deposit_filter,
                         &processed_events_clone,
                         chain_id_clone,
                         &app_config_clone,
@@ -101,10 +91,7 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                         error!("Error processing events for chain {}: {:?}", chain_id_clone, e);
                     }
 
-                    info!("Finished processing blocks for chain {}", chain_id_clone);
                     last_processed_block = to_block;
-                } else {
-                    info!("No new blocks to process for chain {}", chain_id_clone);
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -114,56 +101,50 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
     Ok(())
 }
 
-
-
-
 async fn process_events<M: Middleware + 'static>(
     _contract: &Arc<ContractType>,
     withdrawal_filter: ethers::contract::Event<Arc<M>, M, WithdrawalRequestedFilter>,
     shares_updated_filter: ethers::contract::Event<Arc<M>, M, SharesUpdatedFilter>,
     user_signed_up_filter: ethers::contract::Event<Arc<M>, M, UserSignedUpFilter>,
+    deposit_filter: ethers::contract::Event<Arc<M>, M, DepositFilter>,
     processed_events: &Arc<RwLock<HashMap<String, bool>>>,
     chain_id: U256,
     app_config: &AppConfig,
-) -> Result<usize>  {
+) -> Result<()> {
     let withdrawal_events = withdrawal_filter.query().await?;
     let shares_updated_events = shares_updated_filter.query().await?;
     let user_signed_up_events = user_signed_up_filter.query().await?;
-
-    let mut event_count = 0;
+    let deposit_events = deposit_filter.query().await?;
 
     for event in withdrawal_events {
-        info!("Received WithdrawalRequested event: {:?}", event);
+        info!("Processing WithdrawalRequested event: {:?}", event);
         if let Err(e) = process_withdrawal(event, processed_events, chain_id, app_config).await {
             error!("Error processing withdrawal on chain {}: {:?}", chain_id, e);
-        } else {
-            event_count += 1;
         }
     }
 
     for event in shares_updated_events {
+        info!("Processing SharesUpdated event: {:?}", event);
         if let Err(e) = process_shares_updated(event, chain_id).await {
-            error!(
-                "Error processing shares update on chain {}: {:?}",
-                chain_id, e
-            );
-        } else {
-            event_count += 1;
+            error!("Error processing shares update on chain {}: {:?}", chain_id, e);
         }
     }
 
     for event in user_signed_up_events {
+        info!("Processing UserSignedUp event: {:?}", event);
         if let Err(e) = process_user_signed_up(event, chain_id).await {
-            error!(
-                "Error processing user sign up on chain {}: {:?}",
-                chain_id, e
-            );
-        } else {
-            event_count += 1;
+            error!("Error processing user sign up on chain {}: {:?}", chain_id, e);
         }
     }
 
-    Ok(event_count)
+    for event in deposit_events {
+        info!("Processing Deposit event: {:?}", event);
+        if let Err(e) = process_deposit(event, chain_id).await {
+            error!("Error processing deposit on chain {}: {:?}", chain_id, e);
+        }
+    }
+
+    Ok(())
 }
 
 async fn process_withdrawal(
@@ -172,8 +153,6 @@ async fn process_withdrawal(
     chain_id: U256,
     app_config: &AppConfig,
 ) -> Result<()> {
-    info!("Processing WithdrawalRequested event: {:?}", withdrawal);
-
     let event_id = format!(
         "withdrawal_{}_{}_{}_{}",
         chain_id, withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount
@@ -202,17 +181,6 @@ async fn process_withdrawal(
     let provider = Provider::<Http>::try_from(rpc_url)?;
     let client = SignerMiddleware::new(provider, wallet.clone().with_chain_id(chain_id.as_u64()));
 
-    // Verify the chain ID
-    verify_chain_id(&client, chain_id.as_u64()).await?;
-
-    info!("Wallet address: {:?}", wallet.address());
-
-    // Check if the wallet has enough balance
-    let balance = client.get_balance(wallet.address(), None).await?;
-    if balance < withdrawal.token_amount {
-        return Err(anyhow::anyhow!("Insufficient balance to process withdrawal"));
-    }
-
     // Prepare the transaction
     let tx = TransactionRequest::new()
         .to(withdrawal.user)
@@ -231,31 +199,27 @@ async fn process_withdrawal(
     if let Some(receipt) = receipt {
         info!("Transaction mined in block: {:?}", receipt.block_number);
     } else {
-        warn!("Transaction failed or not mined: {:?}", tx_hash);
+        error!("Transaction failed: {:?}", tx_hash);
     }
 
-    // Save event to file
+    // Save event to file and mark as processed
     let event_json = json!({
         "event_type": "WithdrawalRequested",
         "chain_id": chain_id.to_string(),
         "user": format!("{:?}", withdrawal.user),
         "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
         "token_amount": withdrawal.token_amount.to_string(),
-        "contract_chain_id": withdrawal.chain_id.to_string(),
         "tx_hash": format!("{:?}", tx_hash),
     });
 
     save_event_to_file(&event_json, "events").await?;
-
-    // Mark event as processed
     events.insert(event_id, true);
 
-    // Move event file to processed folder
+    // Move the event file to the processed folder
     move_event_to_processed(&event_json).await?;
 
     Ok(())
 }
-
 
 async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
@@ -266,7 +230,8 @@ async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> R
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    save_event_to_file(&event_json, "events").await
+    save_event_to_file(&event_json, "events").await?;
+    move_event_to_processed(&event_json).await
 }
 
 async fn process_user_signed_up(event: UserSignedUpFilter, chain_id: U256) -> Result<()> {
@@ -277,18 +242,23 @@ async fn process_user_signed_up(event: UserSignedUpFilter, chain_id: U256) -> Re
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    save_event_to_file(&event_json, "events").await
+    save_event_to_file(&event_json, "events").await?;
+    move_event_to_processed(&event_json).await
 }
 
-// fn get_rpc_url_for_chain(chain_id: U256) -> Result<String> {
-//     match chain_id.as_u64() {
-//         11155111 => env::var("ETHEREUM_SEPOLIA_RPC_URL").context("ETHEREUM_SEPOLIA_RPC_URL must be set"),
-//         84532 => env::var("BASE_SEPOLIA_RPC_URL").context("BASE_SEPOLIA_RPC_URL must be set"),
-//         11155420 => env::var("OPTIMISM_SEPOLIA_RPC_URL").context("OPTIMISM_SEPOLIA_RPC_URL must be set"),
-//         3441005 => env::var("MANTA_PACIFIC_SEPOLIA_RPC_URL").context("MANTA_PACIFIC_SEPOLIA_RPC_URL must be set"),
-//         _ => Err(anyhow::anyhow!("Unsupported chain ID: {}", chain_id)),
-//     }
-// }
+async fn process_deposit(event: DepositFilter, chain_id: U256) -> Result<()> {
+    let event_json = json!({
+        "event_type": "Deposit",
+        "chain_id": chain_id.to_string(),
+        "user": format!("{:?}", event.user),
+        "amount": event.amount.to_string(),
+        "new_shares": event.new_shares.to_string(),
+        "contract_chain_id": event.chain_id.to_string(),
+    });
+
+    save_event_to_file(&event_json, "events").await?;
+    move_event_to_processed(&event_json).await
+}
 
 async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Result<()> {
     let events_dir = format!("deposit-graph/{}", folder);
