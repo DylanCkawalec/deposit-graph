@@ -1,0 +1,7 @@
+{
+  "chain_id": "11155111",
+  "contract_chain_id": "11155111",
+  "event_type": "SharesUpdated",
+  "new_shares": "3625",
+  "user": "0x1328e101f2047b0ae35098ee2236fe4237d78656"
+}

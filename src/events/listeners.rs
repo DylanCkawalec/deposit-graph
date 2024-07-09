@@ -12,7 +12,8 @@ use std::env;
 use std::fs;
 use std::ops::Deref;
 use std::sync::Arc;
-
+use tokio::time::sleep;
+use std::time::Duration;
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Provider};
 use ethers::signers::LocalWallet;
@@ -49,7 +50,6 @@ pub async fn listen_for_events(
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
-            // Get the current block number when the listener starts
             let mut last_processed_block = match contract_clone.client().get_block_number().await {
                 Ok(block) => block.as_u64(),
                 Err(e) => {
@@ -69,7 +69,6 @@ pub async fn listen_for_events(
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-                // Verify chain ID
                 if let Err(e) =
                     verify_chain_id(contract_clone.client().deref(), chain_id_clone.as_u64()).await
                 {
@@ -164,22 +163,33 @@ async fn process_events<M: Middleware + 'static>(
     let user_signed_up_events = user_signed_up_filter.query().await.unwrap_or_default();
     let deposit_events = deposit_filter.query().await.unwrap_or_default();
 
+    info!("Received {} withdrawal events", withdrawal_events.len());
+    info!("Received {} shares updated events", shares_updated_events.len());
+    info!("Received {} user signed up events", user_signed_up_events.len());
+    info!("Received {} deposit events", deposit_events.len());
+
     let mut event_count = 0;
 
     for event in withdrawal_events {
-        if let Err(e) = process_withdrawal(event, processed_events, chain_id, app_config).await {
-            error!("Error processing withdrawal on chain {}: {:?}", chain_id, e);
-        } else {
-            event_count += 1;
+        info!("Processing withdrawal event: {:?}", event);
+        let event_id = format!(
+            "withdrawal_{}_{}_{}_{}",
+            chain_id, event.user, event.shares_withdrawn, event.token_amount
+        );
+        let mut events = processed_events.write().await;
+        if !events.contains_key(&event_id) {
+            if let Err(e) = process_withdrawal(event, chain_id, app_config).await {
+                error!("Error processing withdrawal request on chain {}: {:?}", chain_id, e);
+            } else {
+                events.insert(event_id, true);
+                event_count += 1;
+            }
         }
     }
 
     for event in shares_updated_events {
         if let Err(e) = process_shares_updated(event, chain_id).await {
-            error!(
-                "Error processing shares update on chain {}: {:?}",
-                chain_id, e
-            );
+            error!("Error processing shares update on chain {}: {:?}", chain_id, e);
         } else {
             event_count += 1;
         }
@@ -187,10 +197,7 @@ async fn process_events<M: Middleware + 'static>(
 
     for event in user_signed_up_events {
         if let Err(e) = process_user_signed_up(event, chain_id).await {
-            error!(
-                "Error processing user sign up on chain {}: {:?}",
-                chain_id, e
-            );
+            error!("Error processing user sign up on chain {}: {:?}", chain_id, e);
         } else {
             event_count += 1;
         }
@@ -209,21 +216,9 @@ async fn process_events<M: Middleware + 'static>(
 
 async fn process_withdrawal(
     withdrawal: WithdrawalRequestedFilter,
-    processed_events: &Arc<RwLock<HashMap<String, bool>>>,
     chain_id: U256,
     app_config: &AppConfig,
 ) -> Result<()> {
-    let event_id = format!(
-        "withdrawal_{}_{}_{}_{}",
-        chain_id, withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount
-    );
-    let mut events = processed_events.write().await;
-
-    if events.contains_key(&event_id) {
-        info!("Withdrawal already processed: {}", event_id);
-        return Ok(());
-    }
-
     info!(
         "Processing withdrawal for user {:?}, shares: {}, amount: {} on chain {}",
         withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount, chain_id
@@ -258,25 +253,28 @@ async fn process_withdrawal(
 
     if let Some(receipt) = receipt {
         info!("Transaction mined in block: {:?}", receipt.block_number);
+        
+        // Save event to file
+        let event_json = json!({
+            "event_type": "WithdrawalProcessed",
+            "chain_id": chain_id.to_string(),
+            "user": format!("{:?}", withdrawal.user),
+            "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
+            "token_amount": withdrawal.token_amount.to_string(),
+            "tx_hash": format!("{:?}", tx_hash),
+            "block_number": receipt.block_number.unwrap().to_string(),
+        });
+
+        save_event_to_file(&event_json, "events").await?;
+        move_event_to_processed(&event_json).await?;
     } else {
         error!("Transaction failed: {:?}", tx_hash);
+        return Err(anyhow::anyhow!("Transaction failed"));
     }
-
-    // Save event to file and mark as processed
-    let event_json = json!({
-        "event_type": "WithdrawalRequested",
-        "chain_id": chain_id.to_string(),
-        "user": format!("{:?}", withdrawal.user),
-        "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
-        "token_amount": withdrawal.token_amount.to_string(),
-        "tx_hash": format!("{:?}", tx_hash),
-    });
-
-    save_event_to_file(&event_json, "events").await?;
-    events.insert(event_id, true);
 
     Ok(())
 }
+
 
 async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
@@ -341,6 +339,8 @@ async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Res
     Ok(())
 }
 
+
+
 async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
     let current_dir = env::current_dir()?;
     let events_dir = current_dir.join("deposit-graph").join("events");
@@ -364,20 +364,29 @@ async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
     // Ensure the destination directory exists
     fs::create_dir_all(&processed_dir)?;
 
-    // Check if the source file exists before attempting to move it
-    if source_path.exists() {
-        fs::rename(&source_path, &dest_path)?;
-        info!(
-            "Moved event file from {} to {}",
-            source_path.display(),
-            dest_path.display()
-        );
-    } else {
-        error!(
-            "Source file {} does not exist, skipping move operation",
-            source_path.display()
-        );
+    // Try to move the file with retries
+    for _ in 0..5 {  // Try 5 times
+        if source_path.exists() {
+            match fs::rename(&source_path, &dest_path) {
+                Ok(_) => {
+                    info!(
+                        "Moved event file from {} to {}",
+                        source_path.display(),
+                        dest_path.display()
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Error moving file: {:?}", e);
+                }
+            }
+        }
+        sleep(Duration::from_millis(100)).await;  // Wait 100ms before retrying
     }
 
+    error!(
+        "Source file {} does not exist after retries, skipping move operation",
+        source_path.display()
+    );
     Ok(())
 }
