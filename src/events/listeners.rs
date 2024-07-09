@@ -3,24 +3,154 @@ use crate::contracts::{AppState, ContractType};
 use crate::contracts::{
     DepositFilter, SharesUpdatedFilter, UserSignedUpFilter, WithdrawalRequestedFilter,
 };
+use std::path::PathBuf;
+//use ethers::utils::rlp;
+//use ethers::core::types::transaction::eip2718::TypedTransaction;
 use actix_web::web;
 use anyhow::{Context, Result};
+use ethers::middleware::SignerMiddleware;
 use ethers::providers::Middleware;
+use ethers::providers::{Http, Provider};
+use ethers::signers::LocalWallet;
+use ethers::signers::Signer;
+use ethers::types::{TransactionRequest, U256};
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::ops::Deref;
 use std::sync::Arc;
-use tokio::time::sleep;
 use std::time::Duration;
-use ethers::middleware::SignerMiddleware;
-use ethers::providers::{Http, Provider};
-use ethers::signers::LocalWallet;
-use ethers::signers::Signer;
-use ethers::types::{TransactionRequest, U256};
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 use tracing::{error, info};
+//use std::str::FromStr;
+use std::ops::Div;
+use std::path::Path;
+
+async fn process_withdrawal(
+    withdrawal: WithdrawalRequestedFilter,
+    chain_id: U256,
+    app_config: &AppConfig,
+) -> Result<()> {
+    info!(
+        "Processing withdrawal for user {:?}, shares: {}, amount: {} on chain {}",
+        withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount, chain_id
+    );
+
+    let private_key = env::var("PRIVATE_KEY").context("PRIVATE_KEY must be set")?;
+    let wallet: LocalWallet = private_key.parse().context("Failed to parse private key")?;
+
+    let rpc_url = app_config.get_rpc_url(chain_id.as_u64())?;
+    info!("Using RPC URL: {}", rpc_url);
+
+    let provider = Provider::<Http>::try_from(rpc_url)?;
+    let client = SignerMiddleware::new(provider, wallet.clone().with_chain_id(chain_id.as_u64()));
+
+    // Estimate gas price
+    let gas_price = client.get_gas_price().await?;
+    let gas_price_with_buffer = gas_price
+        .saturating_mul(U256::from(120))
+        .div(U256::from(100)); // Add 20% buffer
+
+    // Prepare the transaction
+    let mut tx = TransactionRequest::new()
+        .to(withdrawal.user)
+        .value(withdrawal.token_amount)
+        .from(wallet.address())
+        .gas_price(gas_price_with_buffer);
+
+    // Estimate gas limit
+    let gas_limit = client.estimate_gas(&tx.clone().into(), None).await?;
+    tx = tx.gas(gas_limit);
+
+    // Send the transaction
+    let pending_tx = client.send_transaction(tx, None).await?;
+    let tx_hash = pending_tx.tx_hash();
+
+    info!("Sent withdrawal transaction: {:?}", tx_hash);
+
+    // Wait for the transaction to be mined
+    let receipt = pending_tx.await?;
+
+    if let Some(receipt) = receipt {
+        info!("Transaction mined in block: {:?}", receipt.block_number);
+
+        let event_json = json!({
+            "event_type": "WithdrawalProcessed",
+            "chain_id": chain_id.to_string(),
+            "user": format!("{:?}", withdrawal.user),
+            "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
+            "token_amount": withdrawal.token_amount.to_string(),
+            "tx_hash": format!("{:?}", tx_hash),
+            "block_number": receipt.block_number.unwrap().to_string(),
+        });
+
+        let events_dir = PathBuf::from("deposit-graph").join("events");
+        save_event_to_file(&event_json, &events_dir).await?;
+    } else {
+        error!("Transaction failed: {:?}", tx_hash);
+        return Err(anyhow::anyhow!("Transaction failed"));
+    }
+
+    Ok(())
+}
+
+async fn save_event_to_file(event_json: &serde_json::Value, events_dir: &Path) -> Result<()> {
+    fs::create_dir_all(events_dir)?;
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
+    let user = event_json["user"].as_str().unwrap_or("unknown");
+
+    let filename = format!(
+        "event_{}_{}_{}_{}.json",
+        event_type,
+        user,
+        timestamp,
+        fastrand::u64(..)
+    );
+    let file_path = events_dir.join(&filename);
+
+    fs::write(&file_path, serde_json::to_string_pretty(event_json)?)?;
+    info!("Event saved to file: {}", file_path.display());
+
+    // Move the file to processed
+    let processed_dir = events_dir.parent().unwrap().join("events-finished");
+    move_event_to_processed(&file_path, &processed_dir).await?;
+
+    Ok(())
+}
+
+async fn move_event_to_processed(source_path: &Path, processed_dir: &Path) -> Result<()> {
+    fs::create_dir_all(processed_dir)?;
+
+    let dest_path = processed_dir.join(source_path.file_name().unwrap());
+
+    for _ in 0..5 {
+        // Try 5 times
+        match fs::rename(source_path, &dest_path) {
+            Ok(_) => {
+                info!(
+                    "Moved event file from {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Error moving file: {:?}", e);
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    error!(
+        "Failed to move file {} after multiple attempts",
+        source_path.display()
+    );
+    Ok(())
+}
 
 async fn verify_chain_id<M: Middleware>(provider: &M, expected_chain_id: u64) -> Result<()>
 where
@@ -164,8 +294,14 @@ async fn process_events<M: Middleware + 'static>(
     let deposit_events = deposit_filter.query().await.unwrap_or_default();
 
     info!("Received {} withdrawal events", withdrawal_events.len());
-    info!("Received {} shares updated events", shares_updated_events.len());
-    info!("Received {} user signed up events", user_signed_up_events.len());
+    info!(
+        "Received {} shares updated events",
+        shares_updated_events.len()
+    );
+    info!(
+        "Received {} user signed up events",
+        user_signed_up_events.len()
+    );
     info!("Received {} deposit events", deposit_events.len());
 
     let mut event_count = 0;
@@ -179,7 +315,10 @@ async fn process_events<M: Middleware + 'static>(
         let mut events = processed_events.write().await;
         if !events.contains_key(&event_id) {
             if let Err(e) = process_withdrawal(event, chain_id, app_config).await {
-                error!("Error processing withdrawal request on chain {}: {:?}", chain_id, e);
+                error!(
+                    "Error processing withdrawal request on chain {}: {:?}",
+                    chain_id, e
+                );
             } else {
                 events.insert(event_id, true);
                 event_count += 1;
@@ -189,7 +328,10 @@ async fn process_events<M: Middleware + 'static>(
 
     for event in shares_updated_events {
         if let Err(e) = process_shares_updated(event, chain_id).await {
-            error!("Error processing shares update on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing shares update on chain {}: {:?}",
+                chain_id, e
+            );
         } else {
             event_count += 1;
         }
@@ -197,7 +339,10 @@ async fn process_events<M: Middleware + 'static>(
 
     for event in user_signed_up_events {
         if let Err(e) = process_user_signed_up(event, chain_id).await {
-            error!("Error processing user sign up on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing user sign up on chain {}: {:?}",
+                chain_id, e
+            );
         } else {
             event_count += 1;
         }
@@ -214,68 +359,6 @@ async fn process_events<M: Middleware + 'static>(
     Ok(event_count)
 }
 
-async fn process_withdrawal(
-    withdrawal: WithdrawalRequestedFilter,
-    chain_id: U256,
-    app_config: &AppConfig,
-) -> Result<()> {
-    info!(
-        "Processing withdrawal for user {:?}, shares: {}, amount: {} on chain {}",
-        withdrawal.user, withdrawal.shares_withdrawn, withdrawal.token_amount, chain_id
-    );
-
-    // Get the admin's private key from the environment
-    let private_key = env::var("PRIVATE_KEY").context("PRIVATE_KEY must be set")?;
-    let wallet: LocalWallet = private_key.parse().context("Failed to parse private key")?;
-
-    // Get the RPC URL for the current chain
-    let rpc_url = app_config.get_rpc_url(chain_id.as_u64())?;
-    info!("Using RPC URL: {}", rpc_url);
-
-    // Create a provider and connect the wallet
-    let provider = Provider::<Http>::try_from(rpc_url)?;
-    let client = SignerMiddleware::new(provider, wallet.clone().with_chain_id(chain_id.as_u64()));
-
-    // Prepare the transaction
-    let tx = TransactionRequest::new()
-        .to(withdrawal.user)
-        .value(withdrawal.token_amount)
-        .from(wallet.address());
-
-    // Send the transaction
-    let pending_tx = client.send_transaction(tx, None).await?;
-    let tx_hash = pending_tx.tx_hash();
-
-    info!("Sent withdrawal transaction: {:?}", tx_hash);
-
-    // Wait for the transaction to be mined
-    let receipt = pending_tx.await?;
-
-    if let Some(receipt) = receipt {
-        info!("Transaction mined in block: {:?}", receipt.block_number);
-        
-        // Save event to file
-        let event_json = json!({
-            "event_type": "WithdrawalProcessed",
-            "chain_id": chain_id.to_string(),
-            "user": format!("{:?}", withdrawal.user),
-            "shares_withdrawn": withdrawal.shares_withdrawn.to_string(),
-            "token_amount": withdrawal.token_amount.to_string(),
-            "tx_hash": format!("{:?}", tx_hash),
-            "block_number": receipt.block_number.unwrap().to_string(),
-        });
-
-        save_event_to_file(&event_json, "events").await?;
-        move_event_to_processed(&event_json).await?;
-    } else {
-        error!("Transaction failed: {:?}", tx_hash);
-        return Err(anyhow::anyhow!("Transaction failed"));
-    }
-
-    Ok(())
-}
-
-
 async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> Result<()> {
     let event_json = json!({
         "event_type": "SharesUpdated",
@@ -285,8 +368,8 @@ async fn process_shares_updated(event: SharesUpdatedFilter, chain_id: U256) -> R
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    save_event_to_file(&event_json, "events").await?;
-    move_event_to_processed(&event_json).await
+    let events_dir = PathBuf::from("deposit-graph").join("events");
+    save_event_to_file(&event_json, &events_dir).await
 }
 
 async fn process_user_signed_up(event: UserSignedUpFilter, chain_id: U256) -> Result<()> {
@@ -297,8 +380,8 @@ async fn process_user_signed_up(event: UserSignedUpFilter, chain_id: U256) -> Re
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    save_event_to_file(&event_json, "events").await?;
-    move_event_to_processed(&event_json).await
+    let events_dir = PathBuf::from("deposit-graph").join("events");
+    save_event_to_file(&event_json, &events_dir).await
 }
 
 async fn process_deposit(event: DepositFilter, chain_id: U256) -> Result<()> {
@@ -311,82 +394,6 @@ async fn process_deposit(event: DepositFilter, chain_id: U256) -> Result<()> {
         "contract_chain_id": event.chain_id.to_string(),
     });
 
-    save_event_to_file(&event_json, "events").await?;
-    move_event_to_processed(&event_json).await
-}
-
-async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Result<()> {
-    let current_dir = env::current_dir()?;
-    let events_dir = current_dir.join("deposit-graph").join(folder);
-    fs::create_dir_all(&events_dir)?;
-
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
-    let user = event_json["user"].as_str().unwrap_or("unknown");
-
-    let filename = format!(
-        "event_{}_{}_{}_{}.json",
-        event_type,
-        user,
-        timestamp,
-        fastrand::u64(..)
-    );
-    let file_path = events_dir.join(&filename);
-
-    fs::write(&file_path, serde_json::to_string_pretty(event_json)?)?;
-    info!("Event saved to file: {}", file_path.display());
-
-    Ok(())
-}
-
-
-
-async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
-    let current_dir = env::current_dir()?;
-    let events_dir = current_dir.join("deposit-graph").join("events");
-    let processed_dir = current_dir.join("deposit-graph").join("events-finished");
-
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
-    let user = event_json["user"].as_str().unwrap_or("unknown");
-
-    let filename = format!(
-        "event_{}_{}_{}_{}.json",
-        event_type,
-        user,
-        timestamp,
-        fastrand::u64(..)
-    );
-
-    let source_path = events_dir.join(&filename);
-    let dest_path = processed_dir.join(&filename);
-
-    // Ensure the destination directory exists
-    fs::create_dir_all(&processed_dir)?;
-
-    // Try to move the file with retries
-    for _ in 0..5 {  // Try 5 times
-        if source_path.exists() {
-            match fs::rename(&source_path, &dest_path) {
-                Ok(_) => {
-                    info!(
-                        "Moved event file from {} to {}",
-                        source_path.display(),
-                        dest_path.display()
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!("Error moving file: {:?}", e);
-                }
-            }
-        }
-        sleep(Duration::from_millis(100)).await;  // Wait 100ms before retrying
-    }
-
-    error!(
-        "Source file {} does not exist after retries, skipping move operation",
-        source_path.display()
-    );
-    Ok(())
+    let events_dir = PathBuf::from("deposit-graph").join("events");
+    save_event_to_file(&event_json, &events_dir).await
 }
