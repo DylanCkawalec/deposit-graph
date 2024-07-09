@@ -1,10 +1,7 @@
 use crate::config::AppConfig;
 use crate::contracts::{AppState, ContractType};
 use crate::contracts::{
-    WithdrawalRequestedFilter,
-    SharesUpdatedFilter,
-    UserSignedUpFilter,
-    DepositFilter
+    DepositFilter, SharesUpdatedFilter, UserSignedUpFilter, WithdrawalRequestedFilter,
 };
 use actix_web::web;
 use anyhow::{Context, Result};
@@ -13,15 +10,16 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::ops::Deref;
 use std::sync::Arc;
+
+use ethers::middleware::SignerMiddleware;
+use ethers::providers::{Http, Provider};
+use ethers::signers::LocalWallet;
+use ethers::signers::Signer;
+use ethers::types::{TransactionRequest, U256};
 use tokio::sync::RwLock;
 use tracing::{error, info};
-use ethers::types::{TransactionRequest, U256};
-use ethers::signers::Signer;
-use ethers::middleware::SignerMiddleware;
-use ethers::signers::LocalWallet;
-use ethers::providers::{Provider, Http};
-use std::ops::Deref;
 
 async fn verify_chain_id<M: Middleware>(provider: &M, expected_chain_id: u64) -> Result<()>
 where
@@ -38,7 +36,10 @@ where
     Ok(())
 }
 
-pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: web::Data<AppConfig>) -> Result<()> {
+pub async fn listen_for_events(
+    app_state: web::Data<Arc<AppState>>,
+    app_config: web::Data<AppConfig>,
+) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
         let contract_clone = contract.clone();
         let processed_events_clone = app_state.processed_events.clone();
@@ -48,21 +49,44 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
-            let mut last_processed_block = 0u64;
+            // Get the current block number when the listener starts
+            let mut last_processed_block = match contract_clone.client().get_block_number().await {
+                Ok(block) => block.as_u64(),
+                Err(e) => {
+                    error!(
+                        "Failed to get initial block number for chain {}: {:?}",
+                        chain_id_clone, e
+                    );
+                    return;
+                }
+            };
+
+            info!(
+                "Starting to listen from block {} for chain {}",
+                last_processed_block, chain_id_clone
+            );
 
             loop {
-                let provider = contract_clone.client();
-                if let Err(e) = verify_chain_id(provider.deref(), chain_id_clone.as_u64()).await {
-                    error!("Chain ID verification failed: {:?}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                // Verify chain ID
+                if let Err(e) =
+                    verify_chain_id(contract_clone.client().deref(), chain_id_clone.as_u64()).await
+                {
+                    error!(
+                        "Chain ID verification failed for chain {}: {:?}",
+                        chain_id_clone, e
+                    );
                     continue;
                 }
 
-                let latest_block = match provider.get_block_number().await {
+                let latest_block = match contract_clone.client().get_block_number().await {
                     Ok(block) => block.as_u64(),
                     Err(e) => {
-                        error!("Failed to get latest block for chain {}: {:?}", chain_id_clone, e);
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        error!(
+                            "Failed to get latest block for chain {}: {:?}",
+                            chain_id_clone, e
+                        );
                         continue;
                     }
                 };
@@ -71,14 +95,29 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                     let from_block = last_processed_block + 1;
                     let to_block = latest_block;
 
-                    info!("Processing blocks {} to {} for chain {}", from_block, to_block, chain_id_clone);
+                    info!(
+                        "Processing blocks {} to {} for chain {}",
+                        from_block, to_block, chain_id_clone
+                    );
 
-                    let withdrawal_filter = contract_clone.withdrawal_requested_filter().from_block(from_block).to_block(to_block);
-                    let shares_updated_filter = contract_clone.shares_updated_filter().from_block(from_block).to_block(to_block);
-                    let user_signed_up_filter = contract_clone.user_signed_up_filter().from_block(from_block).to_block(to_block);
-                    let deposit_filter = contract_clone.deposit_filter().from_block(from_block).to_block(to_block);
+                    let withdrawal_filter = contract_clone
+                        .withdrawal_requested_filter()
+                        .from_block(from_block)
+                        .to_block(to_block);
+                    let shares_updated_filter = contract_clone
+                        .shares_updated_filter()
+                        .from_block(from_block)
+                        .to_block(to_block);
+                    let user_signed_up_filter = contract_clone
+                        .user_signed_up_filter()
+                        .from_block(from_block)
+                        .to_block(to_block);
+                    let deposit_filter = contract_clone
+                        .deposit_filter()
+                        .from_block(from_block)
+                        .to_block(to_block);
 
-                    if let Err(e) = process_events(
+                    match process_events(
                         &contract_clone,
                         withdrawal_filter,
                         shares_updated_filter,
@@ -87,14 +126,23 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                         &processed_events_clone,
                         chain_id_clone,
                         &app_config_clone,
-                    ).await {
-                        error!("Error processing events for chain {}: {:?}", chain_id_clone, e);
+                    )
+                    .await
+                    {
+                        Ok(event_count) => info!(
+                            "Processed {} events for chain {}",
+                            event_count, chain_id_clone
+                        ),
+                        Err(e) => error!(
+                            "Error processing events for chain {}: {:?}",
+                            chain_id_clone, e
+                        ),
                     }
 
                     last_processed_block = to_block;
+                } else {
+                    info!("No new blocks to process for chain {}", chain_id_clone);
                 }
-
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
     }
@@ -110,41 +158,53 @@ async fn process_events<M: Middleware + 'static>(
     processed_events: &Arc<RwLock<HashMap<String, bool>>>,
     chain_id: U256,
     app_config: &AppConfig,
-) -> Result<()> {
-    let withdrawal_events = withdrawal_filter.query().await?;
-    let shares_updated_events = shares_updated_filter.query().await?;
-    let user_signed_up_events = user_signed_up_filter.query().await?;
-    let deposit_events = deposit_filter.query().await?;
+) -> Result<usize> {
+    let withdrawal_events = withdrawal_filter.query().await.unwrap_or_default();
+    let shares_updated_events = shares_updated_filter.query().await.unwrap_or_default();
+    let user_signed_up_events = user_signed_up_filter.query().await.unwrap_or_default();
+    let deposit_events = deposit_filter.query().await.unwrap_or_default();
+
+    let mut event_count = 0;
 
     for event in withdrawal_events {
-        info!("Processing WithdrawalRequested event: {:?}", event);
         if let Err(e) = process_withdrawal(event, processed_events, chain_id, app_config).await {
             error!("Error processing withdrawal on chain {}: {:?}", chain_id, e);
+        } else {
+            event_count += 1;
         }
     }
 
     for event in shares_updated_events {
-        info!("Processing SharesUpdated event: {:?}", event);
         if let Err(e) = process_shares_updated(event, chain_id).await {
-            error!("Error processing shares update on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing shares update on chain {}: {:?}",
+                chain_id, e
+            );
+        } else {
+            event_count += 1;
         }
     }
 
     for event in user_signed_up_events {
-        info!("Processing UserSignedUp event: {:?}", event);
         if let Err(e) = process_user_signed_up(event, chain_id).await {
-            error!("Error processing user sign up on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing user sign up on chain {}: {:?}",
+                chain_id, e
+            );
+        } else {
+            event_count += 1;
         }
     }
 
     for event in deposit_events {
-        info!("Processing Deposit event: {:?}", event);
         if let Err(e) = process_deposit(event, chain_id).await {
             error!("Error processing deposit on chain {}: {:?}", chain_id, e);
+        } else {
+            event_count += 1;
         }
     }
 
-    Ok(())
+    Ok(event_count)
 }
 
 async fn process_withdrawal(
@@ -215,9 +275,6 @@ async fn process_withdrawal(
     save_event_to_file(&event_json, "events").await?;
     events.insert(event_id, true);
 
-    // Move the event file to the processed folder
-    move_event_to_processed(&event_json).await?;
-
     Ok(())
 }
 
@@ -261,7 +318,8 @@ async fn process_deposit(event: DepositFilter, chain_id: U256) -> Result<()> {
 }
 
 async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Result<()> {
-    let events_dir = format!("deposit-graph/{}", folder);
+    let current_dir = env::current_dir()?;
+    let events_dir = current_dir.join("deposit-graph").join(folder);
     fs::create_dir_all(&events_dir)?;
 
     let timestamp = chrono::Utc::now().timestamp_millis();
@@ -275,15 +333,19 @@ async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Res
         timestamp,
         fastrand::u64(..)
     );
-    let file_path = format!("{}/{}", events_dir, filename);
+    let file_path = events_dir.join(&filename);
 
     fs::write(&file_path, serde_json::to_string_pretty(event_json)?)?;
-    info!("Event saved to file: {}", file_path);
+    info!("Event saved to file: {}", file_path.display());
 
     Ok(())
 }
 
 async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
+    let current_dir = env::current_dir()?;
+    let events_dir = current_dir.join("deposit-graph").join("events");
+    let processed_dir = current_dir.join("deposit-graph").join("events-finished");
+
     let timestamp = chrono::Utc::now().timestamp_millis();
     let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
     let user = event_json["user"].as_str().unwrap_or("unknown");
@@ -296,20 +358,24 @@ async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
         fastrand::u64(..)
     );
 
-    let source_path = format!("deposit-graph/events/{}", filename);
-    let dest_path = format!("deposit-graph/events-finished/{}", filename);
+    let source_path = events_dir.join(&filename);
+    let dest_path = processed_dir.join(&filename);
 
     // Ensure the destination directory exists
-    fs::create_dir_all("deposit-graph/events-finished")?;
+    fs::create_dir_all(&processed_dir)?;
 
     // Check if the source file exists before attempting to move it
-    if fs::metadata(&source_path).is_ok() {
+    if source_path.exists() {
         fs::rename(&source_path, &dest_path)?;
-        info!("Moved event file from {} to {}", source_path, dest_path);
+        info!(
+            "Moved event file from {} to {}",
+            source_path.display(),
+            dest_path.display()
+        );
     } else {
         error!(
             "Source file {} does not exist, skipping move operation",
-            source_path
+            source_path.display()
         );
     }
 

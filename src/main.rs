@@ -137,6 +137,9 @@ async fn main() -> std::io::Result<()> {
     let app_config_clone = app_config.clone();
 
     tokio::spawn(async move {
+        // Add a delay before starting the event listener
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
         if let Err(e) = events::listen_for_events(app_state_clone, app_config_clone).await {
             error!("Error in event listener: {:?}", e);
         }

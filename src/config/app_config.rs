@@ -59,7 +59,6 @@ impl AppConfig {
                 Err(e) => println!("  Error reading {}: {:?}", chain_config.rpc_url_env, e),
             }
         }
-        
 
         Ok(config)
     }
@@ -82,10 +81,12 @@ impl AppConfig {
     }
 
     pub fn get_rpc_url(&self, chain_id: u64) -> Result<String> {
-        let chain_config = self.chain_configs.iter()
+        let chain_config = self
+            .chain_configs
+            .iter()
             .find(|config| config.chain_id == chain_id)
             .ok_or_else(|| anyhow::anyhow!("Unsupported chain ID: {}", chain_id))?;
-        
+
         env::var(&chain_config.rpc_url_env)
             .context(format!("{} must be set", chain_config.rpc_url_env))
     }

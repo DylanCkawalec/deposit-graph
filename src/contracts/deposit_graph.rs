@@ -1,5 +1,3 @@
-// src/contracts/deposit_graph.rs
-
 use ethers::prelude::*;
 
 abigen!(
@@ -10,8 +8,9 @@ abigen!(
 
 // Explicitly export the types we need
 pub use self::deposit_graph::{
-    WithdrawalRequestedFilter,
+    DepositFilter, // Add this line
+    DepositGraph,
     SharesUpdatedFilter,
     UserSignedUpFilter,
-    DepositGraph,
+    WithdrawalRequestedFilter,
 };
