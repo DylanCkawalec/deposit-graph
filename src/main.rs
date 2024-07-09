@@ -131,7 +131,7 @@ async fn main() -> std::io::Result<()> {
         drpc_api_key: config.drpc_api_key.clone(),
     }));
 
-    let app_config = web::Data::new(config.clone());  // Clone config here
+    let app_config = web::Data::new(config.clone()); // Clone config here
 
     let app_state_clone = app_state.clone();
     let app_config_clone = app_config.clone();

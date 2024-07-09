@@ -3,8 +3,6 @@ use serde::Deserialize;
 use std::env;
 //use std::collections::HashMap;
 
-
-
 #[derive(Clone, Deserialize)]
 pub struct AppConfig {
     pub host: String,
@@ -41,7 +39,10 @@ impl AppConfig {
         for chain_config in &config.chain_configs {
             println!(
                 "Chain ID: {}, Network: {}, Contract Address Env: {}, RPC URL Env: {}",
-                chain_config.chain_id, chain_config.network, chain_config.contract_address_env, chain_config.rpc_url_env
+                chain_config.chain_id,
+                chain_config.network,
+                chain_config.contract_address_env,
+                chain_config.rpc_url_env
             );
             match env::var(&chain_config.contract_address_env) {
                 Ok(address) => println!(
@@ -54,14 +55,8 @@ impl AppConfig {
                 ),
             }
             match env::var(&chain_config.rpc_url_env) {
-                Ok(url) => println!(
-                    "  {} is set to: {}",
-                    chain_config.rpc_url_env, url
-                ),
-                Err(e) => println!(
-                    "  Error reading {}: {:?}",
-                    chain_config.rpc_url_env, e
-                ),
+                Ok(url) => println!("  {} is set to: {}", chain_config.rpc_url_env, url),
+                Err(e) => println!("  Error reading {}: {:?}", chain_config.rpc_url_env, e),
             }
         }
 
@@ -72,7 +67,7 @@ impl AppConfig {
         vec![
             ChainConfig {
                 chain_id: 11155111,
-                network: "sepolia".to_string(),
+                network: "ethereum-sepolia".to_string(),
                 contract_address_env: "ETHEREUM_SEPOLIA_CONTRACT_ADDRESS".to_string(),
                 rpc_url_env: "ETHEREUM_SEPOLIA_RPC_URL".to_string(),
             },
@@ -82,15 +77,16 @@ impl AppConfig {
                 contract_address_env: "OPTIMISM_SEPOLIA_CONTRACT_ADDRESS".to_string(),
                 rpc_url_env: "OPTIMISM_SEPOLIA_RPC_URL".to_string(),
             },
-            // Add more chain configs here as needed
         ]
     }
 
     pub fn get_rpc_url(&self, chain_id: u64) -> Result<String> {
-        let chain_config = self.chain_configs.iter()
+        let chain_config = self
+            .chain_configs
+            .iter()
             .find(|config| config.chain_id == chain_id)
             .ok_or_else(|| anyhow::anyhow!("Unsupported chain ID: {}", chain_id))?;
-        
+
         env::var(&chain_config.rpc_url_env)
             .context(format!("{} must be set", chain_config.rpc_url_env))
     }

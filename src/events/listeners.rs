@@ -1,18 +1,39 @@
-use crate::contracts::{AppState, ContractType};
-use crate::contracts::deposit_graph::{WithdrawalRequestedFilter, SharesUpdatedFilter, UserSignedUpFilter};
 use crate::config::AppConfig;
+use crate::contracts::deposit_graph::{
+    SharesUpdatedFilter, UserSignedUpFilter, WithdrawalRequestedFilter,
+};
+use crate::contracts::{AppState, ContractType};
 use actix_web::web;
 use anyhow::{Context, Result};
 use ethers::prelude::*;
+use ethers::providers::Middleware;
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: web::Data<AppConfig>) -> Result<()> {
+async fn verify_chain_id<M: Middleware>(provider: &M, expected_chain_id: u64) -> Result<()>
+where
+    M::Error: 'static,
+{
+    let chain_id = provider.get_chainid().await?;
+    if chain_id.as_u64() != expected_chain_id {
+        return Err(anyhow::anyhow!(
+            "Chain ID mismatch. Expected: {}, Got: {}",
+            expected_chain_id,
+            chain_id
+        ));
+    }
+    Ok(())
+}
+
+pub async fn listen_for_events(
+    app_state: web::Data<Arc<AppState>>,
+    app_config: web::Data<AppConfig>,
+) -> Result<()> {
     for (chain_id, contract) in &app_state.contracts {
         let contract_clone = contract.clone();
         let processed_events_clone = app_state.processed_events.clone();
@@ -22,27 +43,60 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
         tokio::spawn(async move {
             info!("Starting event listener for chain ID: {}", chain_id_clone);
 
+            // Verify chain ID
+            if let Err(e) =
+                verify_chain_id(contract_clone.client().as_ref(), chain_id_clone.as_u64()).await
+            {
+                error!(
+                    "Chain ID verification failed for chain {}: {:?}",
+                    chain_id_clone, e
+                );
+                return;
+            }
+            info!("Chain ID verified for chain {}", chain_id_clone);
+
             let mut last_processed_block = match contract_clone.client().get_block_number().await {
                 Ok(block) => block.as_u64(),
                 Err(e) => {
-                    error!("Failed to get initial block number for chain {}: {:?}", chain_id_clone, e);
+                    error!(
+                        "Failed to get initial block number for chain {}: {:?}",
+                        chain_id_clone, e
+                    );
                     return;
                 }
             };
+
+            info!(
+                "Initial block number for chain {}: {}",
+                chain_id_clone, last_processed_block
+            );
 
             loop {
                 let latest_block = match contract_clone.client().get_block_number().await {
                     Ok(block) => block.as_u64(),
                     Err(e) => {
-                        error!("Failed to get latest block for chain {}: {:?}", chain_id_clone, e);
+                        error!(
+                            "Failed to get latest block for chain {}: {:?}",
+                            chain_id_clone, e
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         continue;
                     }
                 };
 
+                info!(
+                    "Latest block for chain {}: {}",
+                    chain_id_clone, latest_block
+                );
+
                 if latest_block > last_processed_block {
                     let from_block = last_processed_block + 1;
                     let to_block = latest_block;
+
+                    info!(
+                        "Processing blocks {} to {} for chain {}",
+                        from_block, to_block, chain_id_clone
+                    );
 
                     let withdrawal_filter = contract_clone
                         .withdrawal_requested_filter()
@@ -57,7 +111,7 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                         .from_block(from_block)
                         .to_block(to_block);
 
-                    if let Err(e) = process_events(
+                    match process_events(
                         &contract_clone,
                         withdrawal_filter,
                         shares_updated_filter,
@@ -65,11 +119,26 @@ pub async fn listen_for_events(app_state: web::Data<Arc<AppState>>, app_config: 
                         &processed_events_clone,
                         chain_id_clone,
                         &app_config_clone,
-                    ).await {
-                        error!("Error processing events for chain {}: {:?}", chain_id_clone, e);
+                    )
+                    .await
+                    {
+                        Ok(event_count) => {
+                            info!(
+                                "Processed {} events for chain {} from block {} to {}",
+                                event_count, chain_id_clone, from_block, to_block
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Error processing events for chain {}: {:?}",
+                                chain_id_clone, e
+                            );
+                        }
                     }
 
                     last_processed_block = to_block;
+                } else {
+                    warn!("No new blocks to process for chain {}", chain_id_clone);
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -87,30 +156,44 @@ async fn process_events<M: Middleware + 'static>(
     processed_events: &Arc<RwLock<HashMap<String, bool>>>,
     chain_id: U256,
     app_config: &AppConfig,
-) -> Result<()> {
+) -> Result<usize> {
     let withdrawal_events = withdrawal_filter.query().await?;
     let shares_updated_events = shares_updated_filter.query().await?;
     let user_signed_up_events = user_signed_up_filter.query().await?;
 
+    let mut event_count = 0;
+
     for event in withdrawal_events {
         if let Err(e) = process_withdrawal(event, processed_events, chain_id, app_config).await {
             error!("Error processing withdrawal on chain {}: {:?}", chain_id, e);
+        } else {
+            event_count += 1;
         }
     }
 
     for event in shares_updated_events {
         if let Err(e) = process_shares_updated(event, chain_id).await {
-            error!("Error processing shares update on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing shares update on chain {}: {:?}",
+                chain_id, e
+            );
+        } else {
+            event_count += 1;
         }
     }
 
     for event in user_signed_up_events {
         if let Err(e) = process_user_signed_up(event, chain_id).await {
-            error!("Error processing user sign up on chain {}: {:?}", chain_id, e);
+            error!(
+                "Error processing user sign up on chain {}: {:?}",
+                chain_id, e
+            );
+        } else {
+            event_count += 1;
         }
     }
 
-    Ok(())
+    Ok(event_count)
 }
 
 async fn process_withdrawal(
@@ -223,8 +306,14 @@ async fn save_event_to_file(event_json: &serde_json::Value, folder: &str) -> Res
     let timestamp = chrono::Utc::now().timestamp_millis();
     let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
     let user = event_json["user"].as_str().unwrap_or("unknown");
-    
-    let filename = format!("event_{}_{}_{}_{}.json", event_type, user, timestamp, fastrand::u64(..));
+
+    let filename = format!(
+        "event_{}_{}_{}_{}.json",
+        event_type,
+        user,
+        timestamp,
+        fastrand::u64(..)
+    );
     let file_path = format!("{}/{}", events_dir, filename);
 
     fs::write(&file_path, serde_json::to_string_pretty(event_json)?)?;
@@ -237,9 +326,15 @@ async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
     let timestamp = chrono::Utc::now().timestamp_millis();
     let event_type = event_json["event_type"].as_str().unwrap_or("unknown");
     let user = event_json["user"].as_str().unwrap_or("unknown");
-    
-    let filename = format!("event_{}_{}_{}_{}.json", event_type, user, timestamp, fastrand::u64(..));
-    
+
+    let filename = format!(
+        "event_{}_{}_{}_{}.json",
+        event_type,
+        user,
+        timestamp,
+        fastrand::u64(..)
+    );
+
     let source_path = format!("deposit-graph/events/{}", filename);
     let dest_path = format!("deposit-graph/events-finished/{}", filename);
 
@@ -251,7 +346,10 @@ async fn move_event_to_processed(event_json: &serde_json::Value) -> Result<()> {
         fs::rename(&source_path, &dest_path)?;
         info!("Moved event file from {} to {}", source_path, dest_path);
     } else {
-        error!("Source file {} does not exist, skipping move operation", source_path);
+        error!(
+            "Source file {} does not exist, skipping move operation",
+            source_path
+        );
     }
 
     Ok(())

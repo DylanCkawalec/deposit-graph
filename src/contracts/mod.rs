@@ -40,13 +40,14 @@ pub async fn initialize_contracts(config: &AppConfig) -> Result<HashMap<U256, Ar
             "Attempting to read environment variable: {}",
             chain_config.contract_address_env
         );
-        let contract_address = std::env::var(&chain_config.contract_address_env).with_context(|| {
-            format!(
-                "Missing environment variable: {}. All env vars: {:?}",
-                chain_config.contract_address_env,
-                std::env::vars().collect::<HashMap<_, _>>()
-            )
-        })?;
+        let contract_address =
+            std::env::var(&chain_config.contract_address_env).with_context(|| {
+                format!(
+                    "Missing environment variable: {}. All env vars: {:?}",
+                    chain_config.contract_address_env,
+                    std::env::vars().collect::<HashMap<_, _>>()
+                )
+            })?;
         println!(
             "Contract address for chain {}: {}",
             chain_config.chain_id, contract_address
